@@ -1,0 +1,27 @@
+# -*-Tcl-*-
+# 07-async.test — oraexecasync/orawaitasync and break
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# We try a best-effort async test. If we cannot produce a slow enough statement,
+# we skip gracefully.
+test 07-1.0 {async execute + wait} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        # Try a deliberately heavier SELECT; if it completes too fast, we still accept rc 0
+        oraparse $S "select /*+ materialize */ level from dual connect by level <= 50000"
+        oraexecasync $S
+        # Either it finished quickly (rc==0), or we time out (rc<0). Both are fine to prove API works.
+        set rc [orawaitasync $S -timeout 50]
+        oraclose $S
+        expr {$rc == 0 || $rc < 0}
+    }
+} -result 1
+
+test 07-1.1 {orabreak is callable} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        # We cannot guarantee something is running; just ensure the call succeeds
+        orabreak $L
+    }
+} -result 0

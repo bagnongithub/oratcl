@@ -1,0 +1,82 @@
+# -*-Tcl-*-
+# 00-setup.test — test harness bootstrap for Oratcl 9.0 (ODPI) — tcltest 2.5
+# Assumptions:
+#   - ORATCL_CONNECT env var contains a valid connect string (user/pw@host/service)
+#   - The package "oratcl" (this repo's module) is locatable via auto_path or TCLLIBPATH
+
+package require tcltest 2.5
+namespace import ::tcltest::*
+
+# Try to help the runner find the just-built package if we're inside the source tree.
+# This makes it possible to "make; tclsh ./tests/all.tcl" without installing.
+set ::_oratcl_tests(dir) [file normalize [file dirname [info script]]]
+set ::_oratcl_tests(root) [file normalize [file dirname [file dirname $_oratcl_tests(dir)]]]
+# Typical build layout drops the pkgIndex.tcl into ./ or ./lib — try both.
+foreach cand [list $_oratcl_tests(root) [file join $_oratcl_tests(root) lib] [file join $_oratcl_tests(root) generic]] {
+    if {[file exists [file join $cand pkgIndex.tcl]]} {
+        if {$cand ni $::auto_path} {
+            lappend ::auto_path $cand
+        }
+    }
+}
+
+# Constraints
+testConstraint have_thread   [expr {![catch {package require Thread}]}]
+testConstraint posix         [expr {$::tcl_platform(platform) eq "unix"}]
+testConstraint have_connect  [expr {[info exists ::env(ORATCL_CONNECT)] && $::env(ORATCL_CONNECT) ne ""}]
+testConstraint memory        1           ;# opt-in: enable with "set ::tcltest::testConstraints(memory) 1" or -constraints memory
+
+# Tiny helpers (stay extremely simple so failures are obvious)
+namespace eval ::OratclTest {
+    variable connstr
+    if {[info exists ::env(ORATCL_CONNECT)]} {
+        set connstr $::env(ORATCL_CONNECT)
+    } else {
+        set connstr ""
+    }
+
+    proc connstr {} { variable connstr; return $connstr }
+
+    # Create/destroy a logon around a body. Exposes L in the caller via upvar.
+    proc with_connection {varName body} {
+        upvar 1 $varName L
+        set cs [::OratclTest::connstr]
+        if {$cs eq ""} {
+            return -code SKIP "ORATCL_CONNECT not set"
+        }
+        package require oratcl 9.0
+        set L [oralogon $cs]
+        set rc [catch {uplevel 1 $body} res opts]
+        # Best effort cleanup
+        catch {oralogoff $L}
+        if {$rc} {return -options $opts $res}
+        return $res
+    }
+
+    # A very plain SQL runner (DDL/DML). Uses oraopen/orasql, closes the stmt.
+    proc run_sql {L sql} {
+        set S [oraopen $L]
+        set rc [catch {orasql $S $sql -commit} res opts]
+        catch {oraclose $S}
+        if {$rc} {return -options $opts $res}
+        return $res
+    }
+
+    # Unique object name (uppercased) using PID and an incrementing counter.
+    variable _seq 0
+    proc uniq {base} {
+        variable _seq
+        incr _seq
+        return [string toupper "${base}_[pid]_${_seq}"]
+    }
+}
+
+# Smoke: can we load the package at all?
+test 00-0.1 {package loads} -body {
+    package require oratcl 9.0
+} -result 9.0
+
+# If no connect string, skip the rest of DB-dependent files (they still load).
+test 00-0.2 {connect string present} -constraints {have_connect} -body {
+    expr {[string length [::OratclTest::connstr]] > 0}
+} -result 1

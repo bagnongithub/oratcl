@@ -1,0 +1,24 @@
+# -*-Tcl-*-
+# 02b-plsql.test — orastmt alias and oraplexec
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 02b-1.0 {orastmt is an alias of oraopen} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S1 [oraopen $L]
+        set S2 [orastmt $L]
+        oraclose $S1
+        oraclose $S2
+        expr {[string match "oraS*" $S1] && [string match "oraS*" $S2]}
+    }
+} -result 1
+
+test 02b-1.1 {oraplexec executes a simple PL/SQL block} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        set rc [oraplexec $S {begin null; end;} -commit]
+        oraclose $S
+        set rc
+    }
+} -result 0

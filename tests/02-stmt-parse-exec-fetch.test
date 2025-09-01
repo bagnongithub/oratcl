@@ -1,0 +1,73 @@
+# 02-stmt-parse-exec-fetch.test — statement lifecycle and fetching
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+proc ::OratclTest::mk_basic_table {L} {
+    set T [::OratclTest::uniq oratcl9_t1]
+    catch {::OratclTest::run_sql $L "drop table $T purge"}
+    ::OratclTest::run_sql $L "create table $T (id number primary key, name varchar2(50))"
+    return $T
+}
+
+test 02-1.0 {oraopen/oraclose and parse/exec/fetch with -datavariable} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_basic_table $L]
+        # Insert a couple rows
+        set S [oraopen $L]
+        oraparse $S "insert into $T values (:id,:name)"
+        orabind  $S :id 1 :name Alice
+        oraexec  $S -commit
+        orabind  $S :id 2 :name Bob
+        oraexec  $S -commit
+
+        # Query back
+        oraparse $S "select id, name from $T order by id"
+        oraexec  $S
+        set rows {}
+        # Pull rows as simple lists, indexed by number
+        while {1} {
+            set batch [orafetch $S -indexbynumber -returnrows -max 1]
+            if {[llength $batch] == 0} break
+            foreach row $batch {
+                lappend rows $row
+            }
+        }
+        oraclose $S
+        # Expect two rows: {{1 Alice} {2 Bob}}
+        set rows
+    }
+} -result {{1 Alice} {2 Bob}}
+
+test 02-1.1 {oracols reports metadata} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_basic_table $L]
+        ::OratclTest::run_sql $L "insert into $T values (1,'X')"
+        set S [oraopen $L]
+        oraparse $S "select id, name from $T"
+        oraexec  $S
+        set cols [oracols $S]
+        oraclose $S
+        # Expect a list of dicts containing "name" keys ID/NAME
+        list [dict get [lindex $cols 0] name] [dict get [lindex $cols 1] name]
+    }
+} -result {ID NAME}
+
+test 02-1.2 {oradesc table} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_basic_table $L]
+        set desc [oradesc $L $T]
+        # oradesc returns a list of {name type} pairs — first element's name should be non-empty
+        expr {[llength $desc] >= 2 && [string length [lindex [lindex $desc 0] 0]] > 0}
+    }
+} -result 1
+
+test 02-1.3 {orasql convenience parse+exec} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_basic_table $L]
+        set S [oraopen $L]
+        set rc [orasql $S "insert into $T values (1,'Z')" -commit]
+        oraclose $S
+        set rc
+    }
+} -result 0

@@ -1,0 +1,32 @@
+# -*-Tcl-*-
+# 30-multi-thread.test — basic concurrency using Thread package
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 30-1.0 {create a few worker threads that each run a query} -constraints {have_connect have_thread} -body {
+    # Create 4 threads; each does: package require, connect, select 1, clean up
+    set tids {}
+    for {set i 0} {$i < 4} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        thread::send $tid {package require oratcl 9.0}
+        thread::send $tid {
+            set L [oralogon $::env(ORATCL_CONNECT)]
+            set S [oraopen $L]
+            oraparse $S {select 1 from dual}
+            oraexec $S
+            oraclose $S
+            oralogoff $L
+            return 1
+        }
+    }
+    # Join and collect results
+    set ok 1
+    foreach tid $tids {
+        set r  [thread::join $tid]
+        if {$r ne "0"} {set ok 0}
+    }
+    set ok
+} -result 1

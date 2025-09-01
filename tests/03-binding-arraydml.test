@@ -1,0 +1,51 @@
+# -*-Tcl-*-
+# 03-binding-arraydml.test — orabind, orabindexec, array DML
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+proc ::OratclTest::mk_basic_table {L} {
+    set T [::OratclTest::uniq oratcl9_t2]
+    catch {::OratclTest::run_sql $L "drop table $T purge"}
+    ::OratclTest::run_sql $L "create table $T (id number primary key, name varchar2(50))"
+    return $T
+}
+
+test 03-1.0 {orabind + oraexec (scalar)} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_basic_table $L]
+        set S [oraopen $L]
+        oraparse $S "insert into $T values (:id,:name)"
+        orabind  $S :id 10 :name Ten
+        oraexec  $S -commit
+        oraclose $S
+        # Verify
+        set S [oraopen $L]; oraparse $S "select count(*) from $T where id=10"; oraexec $S
+        orafetch $S -datavariable r -indexbynumber
+        oraclose $S
+        set r
+    }
+} -result {1}
+
+test 03-1.1 {orabindexec -arraydml inserts multiple rows} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_basic_table $L]
+        set S [oraopen $L]
+        oraparse $S "insert into $T values (:id,:name)"
+        orabindexec $S -arraydml :id {1 2 3} :name {A B C} -commit
+        # row count is visible via oramsg rows on the statement
+        set rows [oramsg $S rows]
+        oraclose $S
+        set rows
+    }
+} -result 3
+
+test 03-1.2 {orabindexec -arraydml mismatch list lengths => clear error} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_basic_table $L]
+        set S [oraopen $L]
+        oraparse $S "insert into $T values (:id,:name)"
+        set rc [catch {orabindexec $S -arraydml :id {1 2} :name {A B C}} msg]
+        list $rc $msg
+    }
+} -match glob -result {1 *-arraydml list lengths mismatch:*}

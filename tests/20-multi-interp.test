@@ -1,0 +1,41 @@
+# -*-Tcl-*-
+# 20-multi-interp.test — stability across multiple interpreters
+package require tcltest 2.5
+namespace import ::tcltest::*
+
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 20-1.0 {basic use in a child interp} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set child [interp create]
+        set res [interp eval $child [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]]
+        set res [interp eval $child {package require oratcl 9.0}]
+        # In child, open and run a trivial statement using its own connection
+        set res [interp eval $child {
+            set L2 [oralogon $::env(ORATCL_CONNECT)]
+            set S2 [oraopen $L2]
+            oraparse $S2 {select 1 from dual}
+            oraexec  $S2
+            oraclose $S2
+            oralogoff $L2
+        }]
+        interp delete $child
+        set res
+    }
+} -result 0
+
+test 20-1.1 {adopt same connection handle across interps} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        # The child will adopt the existing handle by its name and run a statement,
+        # then logoff (releasing its addRef only).
+        set child [interp create]
+        interp eval $child [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set r [interp eval $child {set S [oraopen $L]; oraclose $S; oralogoff $L}]
+        interp delete $child
+        # Back in the parent, the connection should still be usable.
+        set rc [oraclose [oraopen $L]]
+        set rc
+    }
+} -result 0

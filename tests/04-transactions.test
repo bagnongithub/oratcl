@@ -1,0 +1,61 @@
+# -*-Tcl-*-
+# 04-transactions.test — autocommit / commit / rollback
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+proc ::OratclTest::mk_t {L} {
+    set T [::OratclTest::uniq oratcl9_tx]
+    catch {::OratclTest::run_sql $L "drop table $T purge"}
+    ::OratclTest::run_sql $L "create table $T (id number primary key, val varchar2(20))"
+    return $T
+}
+
+test 04-1.0 {explicit commit} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_t $L]
+        set S [oraopen $L]
+        oraparse $S "insert into $T values (1,'X')"
+        oraexec  $S
+        # Not committed yet; but in Oracle, DDL autocommits — here it's DML so we control it.
+        oracommit $L
+        oraclose $S
+        # Verify present
+        set S [oraopen $L]; oraparse $S "select count(*) from $T where id=1"; oraexec $S
+        orafetch $S -datavariable r -indexbynumber
+        oraclose $S
+        set r
+    }
+} -result {1}
+
+test 04-1.1 {rollback} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_t $L]
+        set S [oraopen $L]
+        oraparse $S "insert into $T values (1,'X')"
+        oraexec  $S
+        orarollback $L
+        oraclose $S
+        # Verify gone
+        set S [oraopen $L]; oraparse $S "select count(*) from $T where id=1"; oraexec $S
+        orafetch $S -datavariable r -indexbynumber
+        oraclose $S
+        set r
+    }
+} -result {0}
+
+test 04-1.2 {oraautocommit on} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_t $L]
+        oraautocommit $L 1
+        set S [oraopen $L]
+        oraparse $S "insert into $T values (1,'A')"
+        oraexec  $S
+        oraclose $S
+        # Should be committed automatically
+        set S [oraopen $L]; oraparse $S "select count(*) from $T where id=1"; oraexec $S
+        orafetch $S -datavariable r -indexbynumber
+        oraclose $S
+        set r
+    }
+} -result {1}

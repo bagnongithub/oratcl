@@ -1,0 +1,31 @@
+# -*-Tcl-*-
+# 08-oramsg.test — diagnostics snapshot
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 08-1.0 {oramsg after success} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "select 1 from dual"
+        oraexec  $S
+        set rc   [oramsg $S rc]
+        set rows [oramsg $S rows]
+        set warn [oramsg $S warning]
+        oraclose $S
+        list $rc [expr {$rows >= 0}] $warn
+    }
+} -result {0 1 0}
+
+test 08-1.1 {oramsg after error} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        # Force a parse error
+        set _ [catch {oraparse $S "select from"}]
+        set rc   [oramsg $S rc]
+        set err  [oramsg $S error]
+        set code [oramsg $S ocicode]
+        oraclose $S
+        list [expr {$rc != 0}] [expr {[string length $err] > 0}] [expr {$code != 0}]
+    }
+} -result {1 1 1}

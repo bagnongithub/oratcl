@@ -1,0 +1,55 @@
+# -*-Tcl-*-
+# 90-memory.test — coarse leak probes (posix only). Skipped by default (constraint "memory").
+# Enable with:  tclsh tests/all.tcl -constraints memory
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# Helper: current RSS in KiB (Linux/macOS; best-effort)
+proc ::OratclTest::rss_kb {} {
+    if {$::tcl_platform(platform) ne "unix"} {return -1}
+    if {![llength [info commands exec]]} {
+        return -1
+    }
+    set pid [pid]
+    if {[catch {exec ps -o rss= -p $pid} out]} {
+        return -1
+    }
+    set rss [string trim $out]
+    if {![string is integer -strict $rss]} {return -1}
+    return $rss
+}
+
+test 90-1.0 {open/close many statements keeps RSS bounded} -constraints {have_connect posix memory} -body {
+    ::OratclTest::with_connection L {
+        set T0 [::OratclTest::rss_kb]
+        for {set i 0} {$i < 400} {incr i} {
+            set S [oraopen $L]
+            oraparse $S {select 1 from dual}
+            oraexec  $S
+            oraclose $S
+        }
+        set T1 [::OratclTest::rss_kb]
+        # Allow generous growth (< 20000 KiB). This is coarse and environment-dependent.
+        expr {($T0 >= 0 && $T1 >= 0) ? ($T1 - $T0 < 20000) : 1}
+    }
+} -result 1
+
+test 90-1.1 {create/exec array DML loops keeps RSS roughly bounded} -constraints {have_connect posix memory} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::uniq oratcl9_mem]
+        catch {::OratclTest::run_sql $L "drop table $T purge"}
+        ::OratclTest::run_sql $L "create table $T (id number primary key, name varchar2(20))"
+        set T0 [::OratclTest::rss_kb]
+        set S [oraopen $L]
+        oraparse $S "insert into ${T}(id,name) values (:id,:name)"
+        for {set i 0} {$i < 50} {incr i} {
+            set ids {}; set names {}
+            for {set k 1} {$k <= 100} {incr k} {lappend ids $k; lappend names N$k}
+            orabindexec $S -arraydml :id $ids :name $names -commit
+        }
+        oraclose $S
+        set T1 [::OratclTest::rss_kb]
+        expr {($T0 >= 0 && $T1 >= 0) ? ($T1 - $T0 < 40000) : 1}
+    }
+} -result 1

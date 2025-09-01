@@ -1,0 +1,32 @@
+# -*-Tcl-*-
+# 02c-fetch-variants.test — orafetch result shapers
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+proc ::OratclTest::mk_ft {L} {
+    set T [::OratclTest::uniq oratcl9_fx]
+    catch {::OratclTest::run_sql $L "drop table $T purge"}
+    ::OratclTest::run_sql $L "create table $T (id number, name varchar2(30))"
+    ::OratclTest::run_sql $L "insert into $T values (1,'A')"
+    ::OratclTest::run_sql $L "insert into $T values (2,'B')"
+    return $T
+}
+
+test 02c-1.0 {-asdict + -resultvariable} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_ft $L]
+        set S [oraopen $L]
+        oraparse $S "select id, name from $T order by id"
+        oraexec  $S
+        set rows {}
+        while {1} {
+            set rc [orafetch $S -asdict -datavariable row]
+            if {$rc == 1403} break
+            # row is a dict: {ID 1 NAME A}
+            lappend rows [dict get $row ID] [dict get $row NAME]
+        }
+        oraclose $S
+        set rows
+    }
+} -result {1 A 2 B}

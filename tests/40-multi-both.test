@@ -1,0 +1,46 @@
+# -*-Tcl-*-
+# 40-multi-both.test — multi-interp + multi-thread combination
+package require tcltest 2.5
+
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 40-1.0 {in each thread, create a child interp and use oratcl} \
+    -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 5} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+
+        # seed the env in the worker
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+
+        # run the work and terminate the worker; thread::send will error because the
+        # target thread exits while servicing the request – catch and ignore it
+        catch {
+            thread::send $tid {
+                set i1 [interp create]
+                interp eval $i1 {package require oratcl 9.0}
+                interp eval $i1 [list set ::env(ORATCL_CONNECT) $::env(ORATCL_CONNECT)]
+                set r [interp eval $i1 {
+                    set L [oralogon $::env(ORATCL_CONNECT)]
+                    set S [oraopen $L]
+                    oraparse $S {select 1 from dual}
+                    oraexec  $S
+                    oraclose $S
+                    oralogoff $L
+                }]
+                interp delete $i1
+                thread::exit $r   ;# exits the thread with result $r
+            }
+        }
+    }
+
+    set ok 1
+    foreach tid $tids {
+        # join returns the exit result we passed to thread::exit (should be "0")
+        set r [thread::join $tid]
+        if {$r ne "0"} { set ok 0 }
+    }
+    set ok
+} -result 1

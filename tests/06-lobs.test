@@ -1,0 +1,119 @@
+# -*-Tcl-*-
+# 06-lobs.test — CLOB/BLOB fetch, inline vs handle, read/trim/close (FOR UPDATE + robust handle use)
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# Helpers (simple so failures are obvious)
+proc ::OratclTest::mk_lob_table {L} {
+    set T [::OratclTest::uniq oratcl9_lob]
+    catch {::OratclTest::run_sql $L "drop table $T purge"}
+    ::OratclTest::run_sql $L "create table $T (id number primary key, c clob, b blob)"
+    return $T
+}
+
+proc ::OratclTest::bigtext {n} {
+    set s ""
+    for {set i 0} {$i < $n} {incr i} {
+        append s ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+    }
+    return $s
+}
+
+# --- LOB handles path (read + trim) -----------------------------------------
+
+test 06-1.0 {LOB handles: read, trim (row locked), close} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        # Control the transaction explicitly
+        oraautocommit $L 0
+
+        set T   [::OratclTest::mk_lob_table $L]
+        set big [::OratclTest::bigtext 100]             ;# ~6200 chars (ASCII)
+        set blob [binary format a* "hello"]             ;# 5 bytes
+
+        # Insert the row and commit
+        set S [oraopen $L]
+        oraparse $S "insert into ${T}(id,c,b) values (:id,:c,:b)"
+        orabind  $S :id 1 :c $big :b $blob
+        oraexec  $S -commit
+        oraclose $S
+
+        # Fetch with handles and lock the row so CLOB can be trimmed
+        oraconfig $L inlineLobs 0
+        set S [oraopen $L]
+        oraparse $S "select c, b from ${T} where id=1 for update"
+        oraexec  $S
+
+        # Use -asdict so we can address columns by name ("C", "B")
+        set rc [orafetch $S -asdict -datavariable row]
+        oraclose $S
+        if {$rc != 0} {error "unexpected rc=$rc from orafetch"}
+        if {![dict exists $row C] || ![dict exists $row B]} {
+            error "missing columns in fetched row: $row"
+        }
+
+        set ch [dict get $row C]
+        set bh [dict get $row B]
+
+        # Prove both are valid LOB handles by calling size
+        set csize [oralob size $ch]
+        set bsize [oralob size $bh]
+
+        # Read a prefix from the CLOB (explicit 1-based offset)
+        set cprefix [oralob read $ch -offset 1 -amount 32]
+
+        # Trim last 10 characters (requires the FOR UPDATE lock)
+        oralob trim $ch [expr {$csize - 10}]
+        set csize2 [oralob size $ch]
+
+        # Persist the change, then verify with a fresh select
+        oracommit $L
+        set S [oraopen $L]
+        oraparse $S "select length(c) from ${T} where id=1"
+        oraexec  $S
+        orafetch $S -datavariable lenrow -indexbynumber
+        oraclose $S
+        set persisted [lindex $lenrow 0]
+
+        # Close handles
+        oralob close $ch
+        oralob close $bh
+
+        # Expectations:
+        # - CLOB was large; BLOB is 5 bytes; prefix read 32 chars
+        # - post-trim size decreased by 10 and persisted
+        list [expr {$csize > 6000}] $bsize [string length $cprefix] \
+             [expr {$csize2 == $csize - 10}] [expr {$persisted == $csize - 10}]
+    }
+} -result {1 5 32 1 1}
+
+# --- Inline LOBs path (no writes) -------------------------------------------
+
+test 06-1.1 {inline LOBs arrive as Tcl data (no row lock needed)} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T   [::OratclTest::mk_lob_table $L]
+        set big [::OratclTest::bigtext 40]              ;# ~2480 chars (ASCII)
+        set blob [binary format a* "hello"]             ;# 5 bytes
+
+        # Insert
+        set S [oraopen $L]
+        oraparse $S "insert into ${T}(id,c,b) values (:id,:c,:b)"
+        orabind  $S :id 1 :c $big :b $blob
+        oraexec  $S -commit
+        oraclose $S
+
+        # Fetch inline
+        oraconfig $L inlineLobs 1
+        set S [oraopen $L]
+        oraparse $S "select c, b from ${T} where id=1"
+        oraexec  $S
+        orafetch $S -datavariable row -indexbynumber
+        oraclose $S
+
+        set clen [string length [lindex $row 0]]
+        set blen [string length [lindex $row 1]]
+
+        # Expect exact lengths: CLOB equals inserted (ASCII), BLOB=5
+        expr {$clen == [string length $big] && $blen == 5}
+    }
+} -result 1

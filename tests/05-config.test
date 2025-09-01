@@ -1,0 +1,35 @@
+# -*-Tcl-*-
+# 05-config.test — oraconfig on connection and statement
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 05-1.0 {connection-level getters} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        # Known fields: stmtcachesize, fetcharraysize, prefetchrows, prefetchmemory, calltimeout, inlineLobs
+        set s1 [oraconfig $L stmtcachesize]
+        set s2 [oraconfig $L fetcharraysize]
+        set s3 [oraconfig $L prefetchrows]
+        set s4 [oraconfig $L prefetchmemory]
+        list [expr {$s1 >= 0}] [expr {$s2 >= 1}] [expr {$s3 >= 0}] [expr {$s4 >= 0}]
+    }
+} -result {1 1 1 1}
+
+test 05-1.1 {set calltimeout and inlineLobs} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L calltimeout 2500
+        set t [oraconfig $L calltimeout]
+        oraconfig $L inlineLobs 1
+        set il [oraconfig $L inlineLobs]
+        list $t $il
+    }
+} -result {2500 1}
+
+test 05-1.2 {statement fetchrows/prefetchrows} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraconfig $S fetchrows 50
+        oraconfig $S prefetchrows 20
+        list [oraconfig $S fetchrows] [oraconfig $S prefetchrows]
+    }
+} -result {50 20}
