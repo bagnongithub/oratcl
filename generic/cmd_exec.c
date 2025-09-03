@@ -20,6 +20,26 @@
 #include "dpi.h"
 #include "state.h"
 
+#ifdef _WIN32
+#include <ctype.h>
+// Case-insensitive version of strstr
+char* strcasestr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) return (char*)haystack;
+
+    for (; *haystack; haystack++) {
+        // Compare substrings of length needle_len
+        if (_strnicmp(haystack, needle, needle_len) == 0) {
+            return (char*)haystack;
+        }
+    }
+
+    return NULL;
+}
+#endif
+
 void            Oradpi_PendingsForget(Tcl_Interp *, const char *);
 
 extern uint32_t with_colon(const char *nameNoColon, char *buf, uint32_t bufsz);
