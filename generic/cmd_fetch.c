@@ -170,32 +170,39 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     Tcl_Obj    *cmd        = NULL;
     Tcl_WideInt maxRows    = 0;
     Tcl_Obj    *resultVar  = NULL;
-    int         returnRows = 0;
+    int         returnRows = 1;
     int         asDict     = 0;
 
     for (Tcl_Size i = 2; i < objc; i++) {
         const char *o = Tcl_GetString(objv[i]);
-        if (strcmp(o, "-datavariable") == 0 && i + 1 < objc)
-            dataVar = objv[++i];
-        else if (strcmp(o, "-dataarray") == 0 && i + 1 < objc)
-            dataArray = objv[++i];
-        else if (strcmp(o, "-indexbyname") == 0)
+        if (strcmp(o, "-datavariable") == 0 && i + 1 < objc) {
+            dataVar    = objv[++i];
+            returnRows = 0;
+        } else if (strcmp(o, "-dataarray") == 0 && i + 1 < objc) {
+            dataArray  = objv[++i];
+            returnRows = 0;
+        } else if (strcmp(o, "-indexbyname") == 0) {
             indexByName = 1;
-        else if (strcmp(o, "-indexbynumber") == 0)
+            returnRows  = 0;
+        } else if (strcmp(o, "-indexbynumber") == 0) {
             indexByNumber = 1;
-        else if (strcmp(o, "-command") == 0 && i + 1 < objc)
-            cmd = objv[++i];
-        else if (strcmp(o, "-max") == 0 && i + 1 < objc) {
+            returnRows    = 0;
+        } else if (strcmp(o, "-command") == 0 && i + 1 < objc) {
+            cmd        = objv[++i];
+            returnRows = 0;
+        } else if (strcmp(o, "-max") == 0 && i + 1 < objc) {
             if (Tcl_GetWideIntFromObj(ip, objv[++i], &maxRows) != TCL_OK)
                 return TCL_ERROR;
-        } else if (strcmp(o, "-resultvariable") == 0 && i + 1 < objc)
-            resultVar = objv[++i];
-        else if (strcmp(o, "-returnrows") == 0)
+        } else if (strcmp(o, "-resultvariable") == 0 && i + 1 < objc) {
+            resultVar  = objv[++i];
+            returnRows = 0;
+        } else if (strcmp(o, "-returnrows") == 0) {
             returnRows = 1;
-        else if (strcmp(o, "-asdict") == 0)
-            asDict = 1;
-        else
-            returnRows = 1;
+        } else if (strcmp(o, "-asdict") == 0) {
+            asDict     = 1;
+            returnRows = 0;
+        } else
+            return Oradpi_SetError(ip, NULL, -1, "unknown option");
     }
 
     if (!returnRows && maxRows <= 0) {
