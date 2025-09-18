@@ -1,0 +1,254 @@
+<!doctype html><html lang='en'>
+<meta charset='utf-8'>
+<title>ORATCL</title>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<meta name='date' content='September 2025'>
+<meta name='generator' content='Oratcl 9.0 (ODPI-C 5.6.2)'>
+<style>
+:root{
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #57606a;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --code-bg: #f6f8fa;
+  --shadow: rgba(31,35,40,0.08);
+}
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; background: var(--bg); color: var(--fg); }
+body { font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Noto Sans", "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px 16px 60px; }
+.header {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.header h1 { margin: 0; font-size: 28px; }
+.header .meta { color: var(--muted); font-size: 14px; margin-top: 6px; }
+.toc-index-wrap{
+  display: block;
+  padding: 12px 12px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 1px 0 var(--shadow);
+  margin-bottom: 20px;
+}
+.toc-top h2, .index-top h2 { font-size: 18px; margin: 10px 0; }
+.toc-top ol { margin: 0 0 12px 18px; padding: 0; }
+.index-list { columns: 2 260px; column-gap: 24px; list-style: none; padding-left: 0; margin: 0; }
+.index-list li { break-inside: avoid; padding: 2px 0; }
+h2 { margin-top: 28px; font-size: 22px; border-top: 1px solid var(--border); padding-top: 16px;}
+h3 { margin-top: 22px; font-size: 18px; }
+p { margin: 10px 0; }
+pre, code, kbd, samp { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+pre { background: var(--code-bg); padding: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: auto; }
+code { background: var(--code-bg); padding: 1px 4px; }
+.deflist { margin: 12px 0; }
+.deflist dt { font-weight: 600; margin-top: 14px; }
+.deflist dd { margin: 6px 0 10px 0; }
+ul { margin: 10px 0 10px 20px; }
+.indent { margin-left: 20px; border-left: 3px solid var(--border); padding-left: 12px; }
+.footer { margin-top: 40px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); padding-top: 16px; }
+.back-to-top { position: fixed; bottom: 16px; right: 16px; border: 1px solid var(--border); padding: 8px 10px; border-radius: 20px; background: #fff; box-shadow: 0 2px 12px var(--shadow); font-size: 14px;}
+</style>
+<body>
+<div class='container'>
+<header class='header'>
+<h1 id='top'>ORATCL</h1>
+<div class='meta'>Tcl Extension Oratcl 9.0 (ODPI-C 5.6.2) September 2025</div>
+</header>
+<section class='toc-index-wrap'>
+<nav class='toc-top'>
+<h2>Contents</h2>
+<ol>
+<li><a href='#name'>NAME</a></li>
+<li><a href='#synopsis'>SYNOPSIS</a></li>
+<li><a href='#description'>DESCRIPTION</a></li>
+<li><a href='#commands'>COMMANDS</a></li>
+<li><a href='#configuration'>CONFIGURATION</a></li>
+<li><a href='#examples'>EXAMPLES</a></li>
+<li><a href='#environment'>ENVIRONMENT</a></li>
+<li><a href='#threads--multiple-interpreters'>THREADS &amp; MULTIPLE INTERPRETERS</a></li>
+</ol>
+</nav>
+<nav class='index-top'>
+<h2>Index</h2>
+<ul class='index-list'>
+<li><a href='#oraautocommit-logon-handle-01'>oraautocommit logon-handle 0|1</a></li>
+<li><a href='#orabind-stmt-name-value'>orabind stmt :name value ...</a></li>
+<li><a href='#orabindexec-stmt--commit--arraydml-name-list'>orabindexec stmt ?-commit? ?-arraydml? :name list ...</a></li>
+<li><a href='#oracols-stmt'>oracols stmt</a></li>
+<li><a href='#oradesc-stmt'>oradesc stmt</a></li>
+<li><a href='#oraexec-stmt--commit'>oraexec stmt ?-commit?</a></li>
+<li><a href='#oraexecasync-stmt--commit'>oraexecasync stmt ?-commit?</a></li>
+<li><a href='#orafetch-stmt-options'>orafetch stmt ?options?</a></li>
+<li><a href='#orainfo-logon-handle'>orainfo logon-handle</a></li>
+<li><a href='#oralob-read-lob-handle-offset-amount'>oralob read lob-handle offset amount</a></li>
+<li><a href='#oralogoff-logon-handle'>oralogoff logon-handle</a></li>
+<li><a href='#oralogon-connect-string-options'>oralogon connect-string ?options?</a></li>
+<li><a href='#oraopen-logon-handle--alias-orastmt'>oraopen logon-handle  (alias: orastmt)</a></li>
+<li><a href='#oraplexec-stmt-plsql--commit'>oraplexec stmt {pl/sql} ?-commit?</a></li>
+<li><a href='#orasql-stmt-sql--parseonly--commit'>orasql stmt sql ?-parseonly? ?-commit?</a></li>
+<li><a href='#orawaitasync-stmt--timeout-ms'>orawaitasync stmt ?-timeout ms?</a></li>
+</ul>
+</nav>
+</section>
+<h2 id='name'>NAME</h2>
+<p>Oratcl - Tcl 9 interface to Oracle via ODPI-C 5.6.2</p>
+<p></p>
+<h2 id='synopsis'>SYNOPSIS</h2>
+<pre><code>oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|force?
+oralogoff logon-handle
+
+oraopen   logon-handle           # open a statement handle
+orastmt   logon-handle           # alias of oraopen
+oraclose  statement-handle
+
+oraparse  statement-handle sql-text
+orasql    statement-handle sql-text ?-parseonly? ?-commit?
+oraplexec statement-handle {pl/sql block} ?-commit?
+oraexec   statement-handle ?-commit?
+
+orabind      statement-handle :name value ? :name value ... ?
+orabindexec  statement-handle ?-commit? ?-arraydml? :name list ...
+
+orafetch statement-handle
+         ?-datavariable varName?
+         ?-dataarray arrayName?
+         ?-indexbyname|-indexbynumber?
+         ?-command script?
+         ?-max N?
+         ?-resultvariable varName?
+         ?-returnrows?
+         ?-asdict?
+
+oracols statement-handle
+oradesc statement-handle           # {name type} pairs
+
+oramsg  handle rc|error|rows|peo|ocicode|sqltype|fn|action|sqlstate|recoverable|warning|offset|all|allx
+
+oralob  size|read|write|trim|close lob-handle ?args...?
+
+oraautocommit logon-handle 0|1
+oracommit    logon-handle
+orarollback  logon-handle
+orabreak     logon-handle         # cancel active call
+
+oraexecasync  statement-handle ?-commit?
+orawaitasync  statement-handle ?-timeout milliseconds?</code></pre>
+<p></p>
+<h2 id='description'>DESCRIPTION</h2>
+<p></p>
+<p>Oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:</p>
+<p>command signatures use <b>Tcl_Size</b> and are thread/multi-interp safe. One ODPI context is created per</p>
+<p>process; per-interp state (handles, registries) is created on each load. Async execution uses per-statement</p>
+<p>workers with proper addRef/release of underlying dpi handles.</p>
+<p></p>
+<h2 id='commands'>COMMANDS</h2>
+<h3 id='connection'>Connection</h3>
+<div class='indent'>
+<p><b>&quot;-pool</b> Create/acquire via session pool.</p>
+<p><b>&quot;-homogeneous</b> Homogeneous pool (default 1).</p>
+<p><b>&quot;-getmode</b> Pool get mode.</p>
+</div>
+<p>Returns a logon-handle (e.g. "oraL1").</p>
+<p></p>
+<dl class='deflist'>
+<dt id='oralogon-connect-string-options'><b>oralogon</b> <i>connect-string</i> ?options?</dt>
+<dd><p>Connect using either username/password@connect_identifier, or external auth (leave user/pw empty). Options:</p></dd>
+<dt id='oralogoff-logon-handle'><b>oralogoff</b> <i>logon-handle</i></dt>
+<dd><p>Close the connection (see <b>ORA_MSG</b> behavior for error reporting).</p></dd>
+<dt id='oraautocommit-logon-handle-01'><b>oraautocommit</b> <i>logon-handle</i> 0|1</dt>
+<dd><p>Set autocommit. DML/PLSQL commit on success when enabled or when <b>-commit</b> is supplied to exec commands.</p></dd>
+<dt id='orainfo-logon-handle'><b>orainfo</b> <i>logon-handle</i></dt>
+<dd><p>Return a dict with the current connection info. <b>Currently</b> it returns <b>autocommit</b> only.</p></dd>
+</dl>
+<h3 id='statements--execution'>Statements &amp; execution</h3>
+<dl class='deflist'>
+<dt id='oraopen-logon-handle--alias-orastmt'><b>oraopen</b> <i>logon-handle</i>  (alias: <b>orastmt</b>)</dt>
+<dd><p>Open a statement handle.</p></dd>
+<dt id='orasql-stmt-sql--parseonly--commit'><b>orasql</b> <i>stmt</i> <i>sql</i> ?<b>-parseonly</b>? ?<b>-commit</b>?</dt>
+<dd><p>Parse and, unless <b>-parseonly</b>, execute once. Clears the per-statement stored-bind cache if text changes.</p></dd>
+<dt id='oraexec-stmt--commit'><b>oraexec</b> <i>stmt</i> ?<b>-commit</b>?</dt>
+<dd><p>Execute the already-parsed statement (single execution).</p></dd>
+<dt id='oraplexec-stmt-plsql--commit'><b>oraplexec</b> <i>stmt</i> <i>{pl/sql}</i> ?<b>-commit</b>?</dt>
+<dd><p>Prepare and execute a PL/SQL block.</p></dd>
+<dt id='orabind-stmt-name-value'><b>orabind</b> <i>stmt</i> <i>:name value</i> ...</dt>
+<dd><p>Bind scalars by name. LOB type is inferred by name and/or value representation.</p></dd>
+<dt id='orabindexec-stmt--commit--arraydml-name-list'><b>orabindexec</b> <i>stmt</i> ?<b>-commit</b>? ?<b>-arraydml</b>? <i>:name list</i> ...</dt>
+<dd><p>Array DML with name→list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().</p></dd>
+</dl>
+<h3 id='fetching'>Fetching</h3>
+<dl class='deflist'>
+<dt id='orafetch-stmt-options'><b>orafetch</b> <i>stmt</i> ?options?</dt>
+<dd><p>Fetches up to <b>-max N</b> rows and returns <b>0</b> while data remains, or <b>1403</b> at end-of-data. Use <b>-returnrows</b> or <b>-resultvariable</b> to obtain a list of rows; <b>-asdict</b> returns dicts keyed by column names.</p></dd>
+</dl>
+<h3 id='metadata'>Metadata</h3>
+<dl class='deflist'>
+<dt id='oracols-stmt'><b>oracols</b> <i>stmt</i></dt>
+<dd><p>Return column names of the current query.</p></dd>
+<dt id='oradesc-stmt'><b>oradesc</b> <i>stmt</i></dt>
+<dd><p>Return <b>{name type}</b> pairs.</p></dd>
+</dl>
+<h3 id='lobs'>LOBs</h3>
+<dl class='deflist'>
+<dt id='oralob-read-lob-handle-offset-amount'><b>oralob read</b> <i>lob-handle</i> <i>offset</i> <i>amount</i></dt>
+<dd><p>Read as a bytearray. When <b>inlineLobs</b> is enabled at the connection, <b>orafetch</b> returns raw data instead of handles.</p></dd>
+</dl>
+<h3 id='async'>Async</h3>
+<dl class='deflist'>
+<dt id='oraexecasync-stmt--commit'><b>oraexecasync</b> <i>stmt</i> ?<b>-commit</b>?</dt>
+<dd><p>Begin execution in a worker thread. The worker holds addRef() on the underlying dpi handles.</p></dd>
+<dt id='orawaitasync-stmt--timeout-ms'><b>orawaitasync</b> <i>stmt</i> ?<b>-timeout ms</b>?</dt>
+<dd><p>Wait for completion or timeout. On completion, temp LOBs created by <b>orabind</b> are released.</p></dd>
+</dl>
+<h2 id='configuration'>CONFIGURATION</h2>
+<p>Use <b>oraconfig</b> on a <b>logon-handle</b> or a <b>statement-handle</b>.</p>
+<p></p>
+<p>Connection-level keys:</p>
+<p><b>stmtcachesize</b>, <b>fetcharraysize</b>, <b>prefetchrows</b>, <b>prefetchmemory</b>, <b>calltimeout</b> (ms),</p>
+<p><b>inlineLobs</b> (0/1), and failover policy: <b>foMaxAttempts</b>, <b>foBackoffMs</b>, <b>foBackoffFactor</b>,</p>
+<p><b>foErrorClasses</b>, <b>foDebounceMs</b>, <b>-failovercallback</b>.</p>
+<p></p>
+<p>Statement-level keys:</p>
+<p><b>fetchrows</b>, <b>prefetchrows</b> (overrides connection defaults when the statement exists).</p>
+<p></p>
+<h2 id='examples'>EXAMPLES</h2>
+<p></p>
+<p>Basic select:</p>
+<pre><code>set L [oralogon &quot;scott/tiger@//dbhost/pdb&quot;]
+set S [oraopen $L]
+oraparse $S {select empno, ename from emp where deptno = :d}
+orabind  $S :d 10
+oraexec  $S
+set rows {}
+while 1 {
+    set rc [orafetch $S -asdict -datavariable row]
+    if {$rc == 1403} break
+    lappend rows [dict get $row EMPNO] [dict get $row ENAME]
+}
+oraclose $S
+oralogoff $L</code></pre>
+<p></p>
+<p>Array DML:</p>
+<pre><code>set S [oraopen $L]
+oraparse $S {insert into t(x,y) values(:x,:y)}
+orabindexec $S -commit -arraydml :x {1 2 3} :y {A B C}</code></pre>
+<p></p>
+<p>Async:</p>
+<pre><code>oraparse $S {begin dbms_lock.sleep(2); end;}
+oraexecasync $S
+# do other work...
+orawaitasync $S -timeout 3000</code></pre>
+<p></p>
+<h2 id='environment'>ENVIRONMENT</h2>
+<p>The test suite uses <b>ORATCL_CONNECT</b> for the connect string.</p>
+<p></p>
+<h2 id='threads--multiple-interpreters'>THREADS &amp; MULTIPLE INTERPRETERS</h2>
+<p>One global ODPI context is created lazily and destroyed on process exit.</p>
+<p>Each interpreter has isolated handle registries. When statically linked into <b>tclsh</b>,
+every interp calls <b>oratcl_Init</b>; the driver ensures client libraries are loaded only once.</p>
+<a class='back-to-top' href='#top' title='Back to top'>↑ Top</a>
+</div></body></html>
