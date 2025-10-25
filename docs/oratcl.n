@@ -1,0 +1,181 @@
+.TH ORATCL 3 "September 2025" "Oratcl 9.0 (ODPI-C 5.6.2)" "Tcl Extension"
+.SH NAME
+Oratcl \- Tcl 9 interface to Oracle via ODPI-C 5.6.2
+
+.SH SYNOPSIS
+.nf
+oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|force?
+oralogoff logon-handle
+
+oraopen   logon-handle           # open a statement handle
+orastmt   logon-handle           # alias of oraopen
+oraclose  statement-handle
+
+oraparse  statement-handle sql-text
+orasql    statement-handle sql-text ?-parseonly? ?-commit?
+oraplexec statement-handle {pl/sql block} ?-commit?
+oraexec   statement-handle ?-commit?
+
+orabind      statement-handle :name value ? :name value ... ?
+orabindexec  statement-handle ?-commit? ?-arraydml? :name list ...
+
+orafetch statement-handle
+         ?-datavariable varName?
+         ?-dataarray arrayName?
+         ?-indexbyname|-indexbynumber?
+         ?-command script?
+         ?-max N?
+         ?-resultvariable varName?
+         ?-returnrows?
+         ?-asdict?
+
+oracols statement-handle
+oradesc statement-handle           # {name type} pairs
+
+oramsg  handle rc|error|rows|peo|ocicode|sqltype|fn|action|sqlstate|recoverable|warning|offset|all|allx
+
+oralob  size|read|write|trim|close lob-handle ?args...?
+
+oraautocommit logon-handle 0|1
+oracommit    logon-handle
+orarollback  logon-handle
+orabreak     logon-handle         # cancel active call
+
+oraexecasync  statement-handle ?-commit?
+orawaitasync  statement-handle ?-timeout milliseconds?
+.fi
+
+.SH DESCRIPTION
+.PP
+Oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
+command signatures use \fBTcl_Size\fR and are thread/multi-interp safe. One ODPI context is created per
+process; per-interp state (handles, registries) is created on each load. Async execution uses per-statement
+workers with proper addRef/release of underlying dpi handles.
+
+.SH COMMANDS
+.SS Connection
+.TP
+\fBoralogon\fR \fIconnect-string\fR ?options?
+Connect using either username/password@connect_identifier, or external auth (leave user/pw empty).
+Options:
+.RS
+.IP "\fB-pool\fR \fImin max incr\fR" 4
+Create/acquire via session pool.
+.IP "\fB-homogeneous\fR 0|1" 4
+Homogeneous pool (default 1).
+.IP "\fB-getmode\fR wait|nowait|force" 4
+Pool get mode.
+.RE
+Returns a logon-handle (e.g. "oraL1").
+
+.TP
+\fBoralogoff\fR \fIlogon-handle\fR
+Close the connection (see \fBORA_MSG\fR behavior for error reporting).
+
+.TP
+\fBoraautocommit\fR \fIlogon-handle\fR 0|1
+Set autocommit. DML/PLSQL commit on success when enabled or when \fB-commit\fR is supplied to exec commands.
+
+.TP
+\fBorainfo\fR \fIlogon-handle\fR
+Return a dict with the current connection info. \fBCurrently\fR it returns \fBautocommit\fR only.
+
+.SS Statements & execution
+.TP
+\fBoraopen\fR \fIlogon-handle\fR  (alias: \fBorastmt\fR)
+Open a statement handle.
+.TP
+\fBorasql\fR \fIstmt\fR \fIsql\fR ?\fB-parseonly\fR? ?\fB-commit\fR?
+Parse and, unless \fB-parseonly\fR, execute once. Clears the per-statement stored-bind cache if text changes.
+.TP
+\fBoraexec\fR \fIstmt\fR ?\fB-commit\fR?
+Execute the already-parsed statement (single execution).
+.TP
+\fBoraplexec\fR \fIstmt\fR \fI{pl/sql}\fR ?\fB-commit\fR?
+Prepare and execute a PL/SQL block.
+.TP
+\fBorabind\fR \fIstmt\fR \fI:name value\fR ...
+Bind scalars by name. LOB type is inferred by name and/or value representation.
+.TP
+\fBorabindexec\fR \fIstmt\fR ?\fB-commit\fR? ?\fB-arraydml\fR? \fI:name list\fR ...
+Array DML with name→list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().
+
+.SS Fetching
+.TP
+\fBorafetch\fR \fIstmt\fR ?options?
+Fetches up to \fB-max N\fR rows and returns \fB0\fR while data remains, or \fB1403\fR at end-of-data.
+Use \fB-returnrows\fR or \fB-resultvariable\fR to obtain a list of rows; \fB-asdict\fR returns dicts keyed by column names.
+
+.SS Metadata
+.TP
+\fBoracols\fR \fIstmt\fR
+Return column names of the current query.
+.TP
+\fBoradesc\fR \fIstmt\fR
+Return \fB{name type}\fR pairs.
+
+.SS LOBs
+.TP
+\fBoralob read\fR \fIlob-handle\fR \fIoffset\fR \fIamount\fR
+Read as a bytearray. When \fBinlineLobs\fR is enabled at the connection, \fBorafetch\fR returns raw data instead of handles.
+
+.SS Async
+.TP
+\fBoraexecasync\fR \fIstmt\fR ?\fB-commit\fR?
+Begin execution in a worker thread. The worker holds addRef() on the underlying dpi handles.
+.TP
+\fBorawaitasync\fR \fIstmt\fR ?\fB-timeout ms\fR?
+Wait for completion or timeout. On completion, temp LOBs created by \fBorabind\fR are released.
+
+.SH CONFIGURATION
+Use \fBoraconfig\fR on a \fBlogon-handle\fR or a \fBstatement-handle\fR.
+
+Connection-level keys:
+\fBstmtcachesize\fR, \fBfetcharraysize\fR, \fBprefetchrows\fR, \fBprefetchmemory\fR, \fBcalltimeout\fR (ms),
+\fBinlineLobs\fR (0/1), and failover policy: \fBfoMaxAttempts\fR, \fBfoBackoffMs\fR, \fBfoBackoffFactor\fR,
+\fBfoErrorClasses\fR, \fBfoDebounceMs\fR, \fB-failovercallback\fR.
+
+Statement-level keys:
+\fBfetchrows\fR, \fBprefetchrows\fR (overrides connection defaults when the statement exists).
+
+.SH EXAMPLES
+.PP
+Basic select:
+.nf
+set L [oralogon "scott/tiger@//dbhost/pdb"]
+set S [oraopen $L]
+oraparse $S {select empno, ename from emp where deptno = :d}
+orabind  $S :d 10
+oraexec  $S
+set rows {}
+while 1 {
+    set rc [orafetch $S -asdict -datavariable row]
+    if {$rc == 1403} break
+    lappend rows [dict get $row EMPNO] [dict get $row ENAME]
+}
+oraclose $S
+oralogoff $L
+.fi
+
+Array DML:
+.nf
+set S [oraopen $L]
+oraparse $S {insert into t(x,y) values(:x,:y)}
+orabindexec $S -commit -arraydml :x {1 2 3} :y {A B C}
+.fi
+
+Async:
+.nf
+oraparse $S {begin dbms_lock.sleep(2); end;}
+oraexecasync $S
+# do other work...
+orawaitasync $S -timeout 3000
+.fi
+
+.SH ENVIRONMENT
+The test suite uses \fBORATCL_CONNECT\fR for the connect string.
+
+.SH THREADS & MULTIPLE INTERPRETERS
+One global ODPI context is created lazily and destroyed on process exit.
+Each interpreter has isolated handle registries. When statically linked into \fBtclsh\fR,
+every interp calls \fBoratcl_Init\fR; the driver ensures client libraries are loaded only once.
