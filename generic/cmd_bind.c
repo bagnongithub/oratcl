@@ -3,10 +3,9 @@
  *
  *    Bind variable creation and management for statements.
  *
- *        - Uses ODPI‑C typed variables and buffers; supports array DML and name/position binds.
- *        - Per‑statement caches live inside the current interpreter; no global mutable state; mutexes protect
+ *        - Uses ODPI-C typed variables and buffers; supports array DML and name/position binds.
+ *        - Per-statement caches live inside the current interpreter; no global mutable state; mutexes protect
  *          any transient shared tables used for performance.
- *
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -19,9 +18,55 @@
 
 #include "cmd_int.h"
 #include "dpi.h"
-#include "state.h"
 
-uint32_t with_colon(const char *nameNoColon, char *dst, uint32_t cap) {
+typedef struct BindStore {
+    Tcl_HashTable byName;
+} BindStore;
+
+typedef struct BindStoreMap {
+    Tcl_HashTable byStmt;
+} BindStoreMap;
+
+typedef struct PendingRefs {
+    int      n, cap;
+    dpiVar **vars;
+} PendingRefs;
+
+typedef struct PendingMap {
+    Tcl_HashTable byStmt;
+} PendingMap;
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+static int           BindOneByValue_Pending(Tcl_Interp *ip, OradpiStmt *s, PendingRefs *pr, const char *nameNoColon, Tcl_Obj *valueObj);
+static int           BindOneLobScalar_Pending(Tcl_Interp *ip, OradpiStmt *s, PendingRefs *pr, const char *nameNoColon, dpiOracleTypeNum lobType, const char *buf, uint32_t buflen);
+static void          BindStoreDelete(void *cd, Tcl_Interp *ip);
+int                  BindValueByNameDual(OradpiStmt *s, const char *nameNoColon, dpiNativeTypeNum ntn, dpiData *d, Tcl_Interp *ip, const char *ctx);
+int                  BindVarByNameDual(OradpiStmt *s, const char *nameNoColon, dpiVar *var, Tcl_Interp *ip, const char *ctx);
+static BindStore    *GetBindStore(Tcl_Interp *ip, const char *stmtKey);
+static BindStoreMap *GetBindStoreMap(Tcl_Interp *ip);
+static PendingMap   *GetPendingMap(Tcl_Interp *ip);
+static PendingRefs  *GetPendings(Tcl_Interp *ip, const char *stmtKey);
+static int           is_blob_hint(const char *nameNoColon);
+static int           is_clob_hint(const char *nameNoColon);
+void                 Oradpi_BindStoreForget(Tcl_Interp *ip, const char *stmtKey);
+int                  Oradpi_Cmd_Orabind(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int                  Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+void                 Oradpi_PendingsForget(Tcl_Interp *ip, const char *stmtKey);
+static void          Pending_Add(PendingRefs *pr, dpiVar *v);
+static void          PendingDelete(void *cd, Tcl_Interp *ip);
+static void          Pendings_ReleaseAll(PendingRefs *pr);
+static void          StoreBind(BindStore *bs, const char *nameNoColon, Tcl_Obj *v);
+static int           strcasestr_contains(const char *hay, const char *needle);
+static const char   *strip_colon(const char *raw, uint32_t *nlenOut);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
+
+uint32_t             with_colon(const char *nameNoColon, char *dst, uint32_t cap) {
     if (!nameNoColon)
         nameNoColon = "";
     size_t n = strlen(nameNoColon);
@@ -72,16 +117,6 @@ static int is_clob_hint(const char *nameNoColon) {
         return 1;
     return strcasestr_contains(nameNoColon, "clob");
 }
-
-typedef struct BindStore {
-    Tcl_HashTable byName;
-} BindStore;
-
-typedef struct BindStoreMap {
-    Tcl_HashTable byStmt;
-} BindStoreMap;
-
-#define BINDSTORE_ASSOC "oradpi.bindstore"
 
 static void BindStoreDelete(void *cd, Tcl_Interp *ip) {
     (void)ip;
@@ -162,17 +197,6 @@ void Oradpi_BindStoreForget(Tcl_Interp *ip, const char *stmtKey) {
     }
     Tcl_DeleteHashEntry(he);
 }
-
-typedef struct PendingRefs {
-    int      n, cap;
-    dpiVar **vars;
-} PendingRefs;
-
-typedef struct PendingMap {
-    Tcl_HashTable byStmt;
-} PendingMap;
-
-#define PENDING_ASSOC "oradpi.pending"
 
 static void PendingDelete(void *cd, Tcl_Interp *ip) {
     (void)ip;

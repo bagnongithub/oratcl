@@ -4,8 +4,7 @@
  *    Transaction control commands (commit/rollback) for ODPI connections.
  *
  *        - Affects only the target connection in the caller’s interpreter; no global mutable state.
- *        - Thread‑safe ODPI delegation with minimal locking.
- *
+ *        - Thread-safe ODPI delegation with minimal locking.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -16,7 +15,17 @@
 
 #include "cmd_int.h"
 #include "dpi.h"
-#include "state.h"
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+int Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int Oradpi_Cmd_Rollback(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
 
 int Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     (void)cd;

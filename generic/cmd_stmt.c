@@ -1,11 +1,10 @@
 /*
  *  cmd_stmt.c --
  *
- *    Statement lifecycle and configuration (open/close/parse and stmt‑level options).
+ *    Statement lifecycle and configuration (open/close/parse and stmt-level options).
  *
- *        - Applies fetch/prefetch and mode settings; maintains per‑interp caches with no cross‑interp sharing.
- *        - Safe in multi‑threaded builds: statement objects guard ODPI handles and are refcounted per interp.
- *
+ *        - Applies fetch/prefetch and mode settings; maintains per-interp caches with no cross-interp sharing.
+ *        - Safe in multi-threaded builds: statement objects guard ODPI handles and are refcounted per interp.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -17,19 +16,31 @@
 #include <string.h>
 
 #include "cmd_int.h"
-#include "state.h"
 
 #ifndef DPI_DEFAULT_FETCH_ARRAY_SIZE
 #define DPI_DEFAULT_FETCH_ARRAY_SIZE 100
 #endif
 
-void       Oradpi_BindStoreForget(Tcl_Interp *, const char *);
-void       Oradpi_PendingsForget(Tcl_Interp *, const char *);
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
 
-static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_Obj *const objv[]);
-static int Oradpi_ConfigStmt(Tcl_Interp *ip, OradpiStmt *s, Tcl_Size objc, Tcl_Obj *const objv[]);
+int         Oradpi_Cmd_Close(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int         Oradpi_Cmd_Config(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int         Oradpi_Cmd_Open(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int         Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int         Oradpi_Cmd_Stmt(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+static int  Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_Obj *const objv[]);
+static int  Oradpi_ConfigStmt(Tcl_Interp *ip, OradpiStmt *s, Tcl_Size objc, Tcl_Obj *const objv[]);
 
-int        Oradpi_Cmd_Stmt(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
+extern void Oradpi_BindStoreForget(Tcl_Interp *, const char *);
+extern void Oradpi_PendingsForget(Tcl_Interp *, const char *);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
+
+int         Oradpi_Cmd_Stmt(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     return Oradpi_Cmd_Open(cd, ip, objc, objv);
 }
 
@@ -337,8 +348,6 @@ int Oradpi_Cmd_Close(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     (void)Oradpi_StmtWaitForAsync(s, 1 /* cancel */, 0 /* no timeout */);
 
     {
-        extern void Oradpi_BindStoreForget(Tcl_Interp *, const char *);
-        extern void Oradpi_PendingsForget(Tcl_Interp *, const char *);
         const char *stmtKey = Tcl_GetString(s->base.name);
         Oradpi_BindStoreForget(ip, stmtKey);
         Oradpi_PendingsForget(ip, stmtKey);

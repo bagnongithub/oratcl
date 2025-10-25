@@ -3,9 +3,8 @@
  *
  *    Message and status reporting utilities.
  *
- *        - Returns last error and rows‑affected from per‑handle message areas, preserving Oratcl 4.6 options.
- *        - Read‑only queries of per‑interp state; safe in multi‑threaded scenarios.
- *
+ *        - Returns last error and rows-affected from per-handle message areas, preserving Oratcl 4.6 options.
+ *        - Read-only queries of per-interp state; safe in multi-threaded scenarios.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -17,6 +16,17 @@
 #include <string.h>
 
 #include "cmd_int.h"
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+static OradpiBase *Lookup(Tcl_Interp *ip, Tcl_Obj *h);
+int                Oradpi_Cmd_Msg(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
 
 static OradpiBase *Lookup(Tcl_Interp *ip, Tcl_Obj *h) {
     OradpiBase *b  = NULL;

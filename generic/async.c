@@ -19,10 +19,6 @@
 
 #include "cmd_int.h"
 #include "dpi.h"
-#include "state.h"
-
-extern dpiContext *Oradpi_GlobalDpiContext;
-void               Oradpi_PendingsForget(Tcl_Interp *ip, const char *stmtKey);
 
 typedef struct OradpiAsyncEntry {
     Tcl_ThreadId tid;
@@ -45,11 +41,36 @@ typedef struct OradpiAsyncEntry {
     char        *stmtKey;
 } OradpiAsyncEntry;
 
-static Tcl_HashTable gAsyncByStmt;
-static int           gAsyncInit = 0;
-static Tcl_Mutex     gAsyncMutex;
+typedef struct OradpiAsyncArg {
+    OradpiStmt *s;
+} OradpiAsyncArg;
 
-static void          AsyncRegistryEnsure(void) {
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+static OradpiAsyncEntry *AsyncEnsure(OradpiStmt *s, int *isNewOut);
+static OradpiAsyncEntry *AsyncLookup(OradpiStmt *s);
+static void              AsyncRegistryEnsure(void);
+static void              AsyncRemove(OradpiStmt *s);
+static void              AsyncWorker(void *cd);
+void                     Oradpi_CancelAndJoinAllForConn(Tcl_Interp *ip, OradpiConn *co);
+int                      Oradpi_Cmd_ExecAsync(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int                      Oradpi_Cmd_WaitAsync(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int                      Oradpi_StmtWaitForAsync(OradpiStmt *s, int cancel, int timeoutMs);
+
+extern dpiContext       *Oradpi_GlobalDpiContext;
+void                     Oradpi_PendingsForget(Tcl_Interp *ip, const char *stmtKey);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
+
+static Tcl_HashTable     gAsyncByStmt;
+static int               gAsyncInit = 0;
+static Tcl_Mutex         gAsyncMutex;
+
+static void              AsyncRegistryEnsure(void) {
     Tcl_MutexLock(&gAsyncMutex);
     if (!gAsyncInit) {
         Tcl_InitHashTable(&gAsyncByStmt, TCL_ONE_WORD_KEYS);
@@ -106,10 +127,6 @@ static void AsyncRemove(OradpiStmt *s) {
     }
     Tcl_MutexUnlock(&gAsyncMutex);
 }
-
-typedef struct OradpiAsyncArg {
-    OradpiStmt *s;
-} OradpiAsyncArg;
 
 static void AsyncWorker(void *cd) {
     OradpiAsyncArg *a = (OradpiAsyncArg *)cd;

@@ -27,6 +27,14 @@
 #define DPI_DEFAULT_FETCH_ARRAY_SIZE 100
 #endif
 
+#ifndef BINDSTORE_ASSOC
+#define BINDSTORE_ASSOC "oradpi.bindstore"
+#endif
+
+#ifndef PENDING_ASSOC
+#define PENDING_ASSOC "oradpi.pending"
+#endif
+
 typedef struct OradpiMsg {
     int      rc;
     Tcl_Obj *fn;

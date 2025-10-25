@@ -3,10 +3,9 @@
  *
  *    Shared type and state definitions for the extension.
  *
- *        - Declares handle structs for connections, statements, LOBs, and the per‑interpreter state block.
- *        - Designed for multi‑interp/multi‑thread use: per‑interp registries and reference tracking ensure
- *          safe teardown; process‑wide data is protected by Tcl mutexes.
- *
+ *        - Declares handle structs for connections, statements, LOBs, and the per-interpreter state block.
+ *        - Designed for multi-interp/multi-thread use: per-interp registries and reference tracking ensure
+ *          safe teardown; process-wide data is protected by Tcl mutexes.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -15,11 +14,38 @@
  *
  */
 
-#include "state.h"
-
 #include <string.h>
 
 #include "cmd_int.h"
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+static void               GlobalConn_Erase(const char *name);
+static dpiConn           *GlobalConn_Lookup(const char *name, int *pOwnerAlive);
+static void               GlobalConn_MarkOwnerGone(const char *name);
+static void               GlobalConn_Publish(const char *name, dpiConn *conn);
+static void               GlobalConnMap_Init(void);
+static OradpiConn        *Oradpi_AdoptConn(Tcl_Interp *ip, const char *handleName, dpiConn *connFromOwner);
+void                      Oradpi_DeleteInterpData(void *clientData, Tcl_Interp *ip);
+void                      Oradpi_FreeConn(OradpiConn *co);
+static void               Oradpi_FreeLob(OradpiLob *l);
+static void               Oradpi_FreeStmt(OradpiStmt *s);
+static OradpiInterpState *Oradpi_Get(Tcl_Interp *ip);
+void                      Oradpi_GlobalConnErase(const char *name);
+void                      Oradpi_GlobalConnMarkOwnerGone(const char *name);
+OradpiConn               *Oradpi_LookupConn(Tcl_Interp *ip, Tcl_Obj *nameObj);
+OradpiLob                *Oradpi_LookupLob(Tcl_Interp *ip, Tcl_Obj *nameObj);
+OradpiStmt               *Oradpi_LookupStmt(Tcl_Interp *ip, Tcl_Obj *nameObj);
+OradpiConn               *Oradpi_NewConn(Tcl_Interp *ip, dpiConn *conn, dpiPool *pool);
+OradpiLob                *Oradpi_NewLob(Tcl_Interp *ip, dpiLob *lob);
+OradpiStmt               *Oradpi_NewStmt(Tcl_Interp *ip, OradpiConn *co);
+void                      Oradpi_RegisterConnInInterp(OradpiInterpState *st, OradpiConn *co);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
 
 typedef struct GlobalConnRec {
     dpiConn *conn;

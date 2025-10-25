@@ -1,12 +1,6 @@
 /*
  *  cmd_int.h --
  *
- *    LOB handle operations (size/read/write/trim/close).
- *
- *        - Thin wrappers over ODPI LOB APIs with Oratcl handle naming semantics.
- *        - Worker‑thread friendly: I/O paths hold strong references to underlying ODPI handles.
- *
- *
  *  Copyright (c) 2025 Miguel Bañón.
  *
  *  See the file "license.terms" for information on usage and redistribution,

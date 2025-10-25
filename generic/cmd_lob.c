@@ -4,8 +4,7 @@
  *    LOB handle operations (size/read/write/trim/close).
  *
  *        - Thin wrappers over ODPI LOB APIs with Oratcl handle naming semantics.
- *        - Worker‑thread friendly: I/O paths hold strong references to underlying ODPI handles.
- *
+ *        - Worker-thread friendly: I/O paths hold strong references to underlying ODPI handles.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -18,7 +17,16 @@
 
 #include "cmd_int.h"
 #include "dpi.h"
-#include "state.h"
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+int Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
 
 int Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     (void)cd;

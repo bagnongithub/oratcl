@@ -3,9 +3,8 @@
  *
  *    Common utilities (error plumbing, handle naming, numeric parsing, and helpers used across commands).
  *
- *        - Thread‑safe handle‑name generator and lightweight parsing tuned for performance.
- *        - No interpreter‑global effects; utilities operate on explicit state passed by callers.
- *
+ *        - Thread-safe handle-name generator and lightweight parsing tuned for performance.
+ *        - No interpreter-global effects; utilities operate on explicit state passed by callers.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -19,10 +18,24 @@
 
 #include "cmd_int.h"
 #include "dpi.h"
-#include "state.h"
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+static int         Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags);
+static void        Oradpi_FailoverTimerProc(void *clientData);
+int                Oradpi_IsNumberObj(Tcl_Obj *o, long long *asInt, double *asDbl, int *isInt);
+Tcl_Obj           *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix);
+static void        Oradpi_PostFailoverEvent(OradpiConn *co, Tcl_Obj *message);
+void               Oradpi_RecordRows(OradpiBase *h, uint64_t rows);
+int                Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int code, const char *msg);
+int                Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *where);
+void               Oradpi_UpdateStmtType(OradpiStmt *s);
+static void        ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val);
 
 /* ------------------------------------------------------------------------- *
- * Internal state
+ * Stuff
  * ------------------------------------------------------------------------- */
 
 static Tcl_Mutex   gHandleMutex;

@@ -22,6 +22,21 @@
 #include "cmd_int.h"
 #include "dpi.h"
 
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+int                   Oradpi_DpiContextEnsure(Tcl_Interp *ip);
+static void           Oradpi_ProcessExit(void *unused);
+static void           Oratcl_InterpDeleteProc(void *clientData, Tcl_Interp *ip);
+static void           RegisterCommands(Tcl_Interp *ip);
+DLLEXPORT int         oratcl_Init(Tcl_Interp *ip);
+DLLEXPORT int         oratcl_SafeInit(Tcl_Interp *ip);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
+
 DLLEXPORT dpiContext *Oradpi_GlobalDpiContext = NULL;
 static Tcl_Mutex     *gCtxMutex               = NULL;
 static int            gExitHookRegistered     = 0;

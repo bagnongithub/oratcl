@@ -3,10 +3,9 @@
  *
  *    Connection management commands and helpers (logon/logoff, pooled and dedicated connections).
  *
- *        - Parses connect strings and external auth; opens dpiConn via ODPI‑C only.
+ *        - Parses connect strings and external auth; opens dpiConn via ODPI-C only.
  *        - Registers connections in the current interpreter while avoiding duplicate client loads across interps.
- *        - Thread‑aware: minimal shared mutable state; process‑wide pieces guarded by Tcl mutexes.
- *
+ *        - Thread-aware: minimal shared mutable state; process-wide pieces guarded by Tcl mutexes.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -18,7 +17,21 @@
 #include <string.h>
 
 #include "cmd_int.h"
-#include "state.h"
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+int                Oradpi_Cmd_Autocommit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int                Oradpi_Cmd_Break(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int                Oradpi_Cmd_Info(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int                Oradpi_Cmd_Logoff(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int                Oradpi_Cmd_Logon(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+static void        Oradpi_ParseConnect(const char *cs, const char **user, uint32_t *ulen, const char **pw, uint32_t *plen, const char **db, uint32_t *dblen, int *extAuth);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
 
 extern dpiContext *Oradpi_GlobalDpiContext;
 

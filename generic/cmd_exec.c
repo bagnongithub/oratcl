@@ -18,39 +18,68 @@
 
 #include "cmd_int.h"
 #include "dpi.h"
-#include "state.h"
+
+typedef struct BindStore {
+    Tcl_HashTable byName;
+} BindStore;
+
+typedef struct BindStoreMap {
+    Tcl_HashTable byStmt;
+} BindStoreMap;
+
+typedef struct PendingRefs {
+    int      n, cap;
+    dpiVar **vars;
+} PendingRefs;
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+static int        BindOneByValue_Pending(Tcl_Interp *ip, OradpiStmt *s, PendingRefs *pr, const char *nameNoColon, Tcl_Obj *valueObj);
+static int        BindOneLobScalar_Pending(Tcl_Interp *ip, OradpiStmt *s, PendingRefs *pr, const char *nameNoColon, dpiOracleTypeNum lobType, const char *buf, uint32_t buflen);
+static int        BindValueByNameDual(OradpiStmt *s, const char *nameNoColon, dpiNativeTypeNum ntn, dpiData *d, Tcl_Interp *ip, const char *ctx);
+static int        BindVarByNameDual(OradpiStmt *s, const char *nameNoColon, dpiVar *var, Tcl_Interp *ip, const char *ctx);
+static void       ClearBindStoreForStmt(Tcl_Interp *ip, const char *stmtKey);
+static int        ExecOnce_WithRebind(Tcl_Interp *ip, OradpiStmt *s, const char *skey, int doCommit);
+static BindStore *LookupBindStore(Tcl_Interp *ip, const char *stmtKey);
+int               Oradpi_Cmd_Exec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int               Oradpi_Cmd_Plexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int               Oradpi_Cmd_StmtSql(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+static void       Pendings_Add(PendingRefs *pr, dpiVar *v);
+static void       Pendings_Init(PendingRefs *pr);
+static void       Pendings_ReleaseAll(PendingRefs *pr);
+static int        RebindAllStored_Pending(Tcl_Interp *ip, OradpiStmt *s, PendingRefs *pr, BindStore *bs);
+char             *strcasestr(const char *haystack, const char *needle);
+
+extern void       Oradpi_PendingsForget(Tcl_Interp *, const char *);
+extern uint32_t   with_colon(const char *nameNoColon, char *buf, uint32_t bufsz);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
 
 #ifdef _WIN32
 #include <ctype.h>
 // Case-insensitive version of strstr
-char* strcasestr(const char* haystack, const char* needle) {
-    if (!haystack || !needle) return NULL;
+char *strcasestr(const char *haystack, const char *needle) {
+    if (!haystack || !needle)
+        return NULL;
 
     size_t needle_len = strlen(needle);
-    if (needle_len == 0) return (char*)haystack;
+    if (needle_len == 0)
+        return (char *)haystack;
 
     for (; *haystack; haystack++) {
         // Compare substrings of length needle_len
         if (_strnicmp(haystack, needle, needle_len) == 0) {
-            return (char*)haystack;
+            return (char *)haystack;
         }
     }
 
     return NULL;
 }
 #endif
-
-void            Oradpi_PendingsForget(Tcl_Interp *, const char *);
-
-extern uint32_t with_colon(const char *nameNoColon, char *buf, uint32_t bufsz);
-
-typedef struct BindStore {
-    Tcl_HashTable byName;
-} BindStore;
-typedef struct BindStoreMap {
-    Tcl_HashTable byStmt;
-} BindStoreMap;
-#define BINDSTORE_ASSOC "oradpi.bindstore"
 
 static BindStore *LookupBindStore(Tcl_Interp *ip, const char *stmtKey) {
     BindStoreMap *bm = (BindStoreMap *)Tcl_GetAssocData(ip, BINDSTORE_ASSOC, NULL);
@@ -80,11 +109,6 @@ static void ClearBindStoreForStmt(Tcl_Interp *ip, const char *stmtKey) {
     }
     Tcl_DeleteHashEntry(he);
 }
-
-typedef struct PendingRefs {
-    int      n, cap;
-    dpiVar **vars;
-} PendingRefs;
 
 static void Pendings_Init(PendingRefs *pr) {
     pr->n    = 0;

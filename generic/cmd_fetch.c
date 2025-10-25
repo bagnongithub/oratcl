@@ -4,9 +4,8 @@
  *    Row fetch and result materialization.
  *
  *        - Maps ODPI column types to Tcl objects; supports `-max`, name/position addressing, LOB streaming,
- *          and optional per‑row callbacks.
- *        - Per‑interp data paths only; no process‑global state; thread‑safe access to result buffers.
- *
+ *          and optional per-row callbacks.
+ *        - Per-interp data paths only; no process-global state; thread-safe access to result buffers.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -23,9 +22,21 @@
 
 #include "cmd_int.h"
 #include "dpi.h"
-#include "state.h"
 
-static int is_char_type(dpiOracleTypeNum otn) {
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+static int      is_char_type(dpiOracleTypeNum otn);
+int             Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+static Tcl_Obj *upper_copy(const char *s, uint32_t n);
+static Tcl_Obj *ValueToObj(Tcl_Interp *ip, OradpiStmt *st, dpiNativeTypeNum nt, dpiData *d, int colIsChar);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
+
+static int      is_char_type(dpiOracleTypeNum otn) {
     switch (otn) {
     case DPI_ORACLE_TYPE_VARCHAR:
     case DPI_ORACLE_TYPE_NVARCHAR:

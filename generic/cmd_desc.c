@@ -3,9 +3,8 @@
  *
  *    Metadata and describe utilities for columns and statements.
  *
- *        - Retrieves query/statement descriptors via ODPI‑C; presents Oratcl‑compatible lists/dicts.
- *        - Read‑only operations that are safe across interps and threads.
- *
+ *        - Retrieves query/statement descriptors via ODPI-C; presents Oratcl-compatible lists/dicts.
+ *        - Read-only operations that are safe across interps and threads.
  *
  *  Copyright (c) 2025 Miguel Bañón.
  *
@@ -18,6 +17,17 @@
 #include <string.h>
 
 #include "cmd_int.h"
+
+/* ==========================================================================
+ * Forward Declarations
+ * ========================================================================== */
+
+int Oradpi_Cmd_Cols(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int Oradpi_Cmd_Desc(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+
+/* ------------------------------------------------------------------------- *
+ * Stuff
+ * ------------------------------------------------------------------------- */
 
 int Oradpi_Cmd_Cols(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     (void)cd;
