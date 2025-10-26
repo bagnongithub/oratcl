@@ -141,10 +141,10 @@ orawaitasync  statement-handle ?-timeout milliseconds?</code></pre>
 <p></p>
 <h2 id='description'>DESCRIPTION</h2>
 <p></p>
-<p>Oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:</p>
-<p>command signatures use <b>Tcl_Size</b> and are thread/multi-interp safe. One ODPI context is created per</p>
-<p>process; per-interp state (handles, registries) is created on each load. Async execution uses per-statement</p>
-<p>workers with proper addRef/release of underlying dpi handles.</p>
+<p>Oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
+command signatures use <b>Tcl_Size</b> and are thread/multi-interp safe. One ODPI context is created per
+process; per-interp state (handles, registries) is created on each load. Async execution uses per-statement
+workers with proper addRef/release of underlying dpi handles.</p>
 <p></p>
 <h2 id='commands'>COMMANDS</h2>
 <h3 id='connection'>Connection</h3>
