@@ -3,7 +3,7 @@
 <title>ORATCL</title>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <meta name='date' content='September 2025'>
-<meta name='generator' content='Oratcl 9.0 (ODPI-C 5.6.2)'>
+<meta name='generator' content='oratcl 9.0 (ODPI-C 5.6.2)'>
 <style>
 :root{
   --bg: #ffffff;
@@ -57,7 +57,7 @@ ul { margin: 10px 0 10px 20px; }
 <div class='container'>
 <header class='header'>
 <h1 id='top'>ORATCL</h1>
-<div class='meta'>Tcl Extension Oratcl 9.0 (ODPI-C 5.6.2) September 2025</div>
+<div class='meta'>Tcl Extension oratcl 9.0 (ODPI-C 5.6.2) September 2025</div>
 </header>
 <section class='toc-index-wrap'>
 <nav class='toc-top'>
@@ -96,7 +96,7 @@ ul { margin: 10px 0 10px 20px; }
 </nav>
 </section>
 <h2 id='name'>NAME</h2>
-<p>Oratcl - Tcl 9 interface to Oracle via ODPI-C 5.6.2</p>
+<p>oratcl - Tcl 9 interface to Oracle via ODPI-C 5.6.2</p>
 <p></p>
 <h2 id='synopsis'>SYNOPSIS</h2>
 <pre><code>oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|force?
@@ -141,7 +141,7 @@ orawaitasync  statement-handle ?-timeout milliseconds?</code></pre>
 <p></p>
 <h2 id='description'>DESCRIPTION</h2>
 <p></p>
-<p>Oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
+<p>oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
 command signatures use <b>Tcl_Size</b> and are thread/multi-interp safe. One ODPI context is created per
 process; per-interp state (handles, registries) is created on each load. Async execution uses per-statement
 workers with proper addRef/release of underlying dpi handles.</p>
