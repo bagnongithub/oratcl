@@ -42,6 +42,7 @@ PRJ_LIBS = $(ADDLINKOPTS)
 pkgindex:
 	@echo package ifneeded $(PRJ_PACKAGE_TCLNAME) $(DOTVERSION) \
 	    [list load [file join $$dir $(PRJLIBNAME9)] $(PRJ_PACKAGE_TCLNAME)] > $(OUT_DIR)\pkgIndex.tcl
+	@echo package provide $(PRJ_PACKAGE_TCLNAME) $(DOTVERSION) 				>> $(OUT_DIR)\pkgIndex.tcl
 
 $(ROOT)\manifest.uuid:
    copy $(WIN_DIR)\gitmanifest.in $(ROOT)\manifest.uuid
