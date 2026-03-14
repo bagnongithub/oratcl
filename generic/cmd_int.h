@@ -17,51 +17,78 @@
 #include "dpi.h"
 #include "state.h"
 
-int         Oradpi_Cmd_Autocommit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Break(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Close(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Cols(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Config(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Desc(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Exec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_ExecAsync(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Info(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Logoff(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Logon(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Msg(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Open(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Orabind(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Plexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Rollback(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_Stmt(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_StmtSql(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int         Oradpi_Cmd_WaitAsync(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int Oradpi_Cmd_Autocommit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Break(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Close(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Cols(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Config(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Desc(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Exec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_ExecAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Info(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Msg(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Open(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Orabind(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Parse(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Plexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Rollback(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Stmt(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_StmtSql(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 
 /* Util */
-Tcl_Obj    *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix);
-int         Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int rc, const char *msg);
-int         Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *fn);
-int         Oradpi_IsNumberObj(Tcl_Obj *o, long long *asInt, double *asDbl, int *isInt);
-void        Oradpi_RecordRows(OradpiBase *h, uint64_t rows);
-void        Oradpi_UpdateStmtType(OradpiStmt *s);
+Tcl_Obj* Oradpi_NewHandleName(Tcl_Interp* ip, const char* prefix);
+int Oradpi_SetError(Tcl_Interp* ip, OradpiBase* h, int rc, const char* msg);
+int Oradpi_SetErrorFromODPI(Tcl_Interp* ip, OradpiBase* h, const char* fn);
+int Oradpi_SetErrorFromODPIInfo(Tcl_Interp* ip, OradpiBase* h, const char* where, const dpiErrorInfo* ei);
+int Oradpi_IsNumberObj(Tcl_Obj* o, long long* asInt, double* asDbl, int* isInt);
+void Oradpi_RecordRows(OradpiBase* h, uint64_t rows);
+void Oradpi_UpdateStmtType(OradpiStmt* s);
+void Oradpi_FreeMsg(OradpiMsg* m);
 
 /* State ops */
-OradpiConn *Oradpi_NewConn(Tcl_Interp *ip, dpiConn *conn, dpiPool *pool);
-OradpiConn *Oradpi_LookupConn(Tcl_Interp *ip, Tcl_Obj *nameObj);
-OradpiStmt *Oradpi_NewStmt(Tcl_Interp *ip, OradpiConn *co);
-OradpiStmt *Oradpi_LookupStmt(Tcl_Interp *ip, Tcl_Obj *nameObj);
-OradpiLob  *Oradpi_NewLob(Tcl_Interp *ip, dpiLob *lob);
-void        Oradpi_DeleteInterpData(void *clientData, Tcl_Interp *ip);
+OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool);
+OradpiConn* Oradpi_LookupConn(Tcl_Interp* ip, Tcl_Obj* nameObj);
+OradpiStmt* Oradpi_NewStmt(Tcl_Interp* ip, OradpiConn* co);
+OradpiStmt* Oradpi_LookupStmt(Tcl_Interp* ip, Tcl_Obj* nameObj);
+OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob);
+void Oradpi_FreeConn(OradpiConn* co);
+void Oradpi_FreeStmt(Tcl_Interp* ip, OradpiStmt* s);
+void Oradpi_FreeLob(OradpiLob* l);
+void Oradpi_DeleteInterpData(void* clientData, Tcl_Interp* ip);
+void Oradpi_RemoveStmt(Tcl_Interp* ip, OradpiStmt* s);
 
-int         Oradpi_DpiContextEnsure(Tcl_Interp *ip);
+int Oradpi_DpiContextEnsure(Tcl_Interp* ip);
 
 /* Async APIs */
-int         Oradpi_StmtWaitForAsync(OradpiStmt *s, int doCancel, int timeoutMs);
-void        Oradpi_CancelAndJoinAllForConn(Tcl_Interp *ip, OradpiConn *co);
+int Oradpi_StmtWaitForAsync(OradpiStmt* s, int doCancel, int timeoutMs);
+int Oradpi_StmtIsAsyncBusy(OradpiStmt* s);
+void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co);
+
+/* Shared bind infrastructure (cmd_bind.c) */
+typedef struct OradpiPendingRefs
+{
+    Tcl_Size n, cap;
+    dpiVar** vars;
+} OradpiPendingRefs;
+
+void Oradpi_PendingsInit(OradpiPendingRefs* pr);
+void Oradpi_PendingsAdd(OradpiPendingRefs* pr, dpiVar* v);
+void Oradpi_PendingsReleaseAll(OradpiPendingRefs* pr);
+void Oradpi_PendingsFree(OradpiPendingRefs* pr);
+
+void Oradpi_BindStoreForget(Tcl_Interp* ip, const char* stmtKey);
+void Oradpi_PendingsForget(Tcl_Interp* ip, const char* stmtKey);
+void Oradpi_ClearBindStoreForStmt(Tcl_Interp* ip, const char* stmtKey);
+int Oradpi_BindOneByValue(Tcl_Interp* ip, OradpiStmt* s, OradpiPendingRefs* pr, const char* nameNoColon, Tcl_Obj* valueObj);
+int Oradpi_RebindAllStored(Tcl_Interp* ip, OradpiStmt* s, OradpiPendingRefs* pr, const char* stmtKey);
+uint32_t Oradpi_WithColon(const char* nameNoColon, char* dst, uint32_t cap);
+const char* Oradpi_StripColon(const char* raw, uint32_t* nlenOut);
 
 #endif /* ORATCL_ODPI_CMD_INT_H */

@@ -20,38 +20,43 @@
  * Forward Declarations
  * ========================================================================== */
 
-int Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
-int Oradpi_Cmd_Rollback(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Rollback(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 
 /* ------------------------------------------------------------------------- *
  * Stuff
  * ------------------------------------------------------------------------- */
 
-int Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
+int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
+{
     (void)cd;
-    if (objc != 2) {
+    if (objc != 2)
+    {
         Tcl_WrongNumArgs(ip, 1, objv, "logon-handle");
         return TCL_ERROR;
     }
-    OradpiConn *co = Oradpi_LookupConn(ip, objv[1]);
+    OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
     if (dpiConn_commit(co->conn) != DPI_SUCCESS)
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_commit");
+        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)co, "dpiConn_commit");
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }
 
-int Oradpi_Cmd_Rollback(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
-    if (objc != 2) {
+int Oradpi_Cmd_Rollback(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
+{
+    (void)cd;
+    if (objc != 2)
+    {
         Tcl_WrongNumArgs(ip, 1, objv, "logon-handle");
         return TCL_ERROR;
     }
-    OradpiConn *co = Oradpi_LookupConn(ip, objv[1]);
+    OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
     if (dpiConn_rollback(co->conn) != DPI_SUCCESS)
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_rollback");
+        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)co, "dpiConn_rollback");
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }

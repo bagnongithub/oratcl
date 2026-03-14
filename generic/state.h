@@ -35,92 +35,95 @@
 #define PENDING_ASSOC "oradpi.pending"
 #endif
 
-typedef struct OradpiMsg {
-    int      rc;
-    Tcl_Obj *fn;
-    Tcl_Obj *sqlstate;
-    Tcl_Obj *action;
-    Tcl_Obj *error;
+typedef struct OradpiMsg
+{
+    int rc;
+    Tcl_Obj* fn;
+    Tcl_Obj* sqlstate;
+    Tcl_Obj* action;
+    Tcl_Obj* error;
     uint64_t rows;
-    int      sqltype;
+    int sqltype;
     uint32_t peo;
-    int      ocicode;
-    int      recoverable;
-    int      warning;
+    int ocicode;
+    int recoverable;
+    int warning;
     uint32_t offset;
 } OradpiMsg;
 
-typedef struct OradpiBase {
-    Tcl_Obj  *name;
+typedef struct OradpiBase
+{
+    Tcl_Obj* name;
     OradpiMsg msg;
 } OradpiBase;
 
-typedef struct OradpiConn {
-    OradpiBase     base;
-    dpiConn       *conn;
-    dpiPool       *pool;
-    int            autocommit;
+typedef struct OradpiConn
+{
+    OradpiBase base;
+    dpiConn* conn;
+    dpiPool* pool;
+    int autocommit;
 
     /* Connection-level configuration */
-    uint32_t       stmtCacheSize;
-    uint32_t       fetchArraySize;
-    uint32_t       prefetchRows;
-    uint32_t       prefetchMemory;
-    uint32_t       callTimeout;
-    int            inlineLobs;
+    uint32_t stmtCacheSize;
+    uint32_t fetchArraySize;
+    uint32_t prefetchRows;
+    uint32_t prefetchMemory;
+    uint32_t callTimeout;
+    int inlineLobs;
+
+    /* Cached encoding string from ODPI (avoids per-bind round-trip) */
+    char* cachedEncoding;
 
     /* Driver-side failover policy (round-trippable) */
-    uint32_t       foMaxAttempts;
-    uint32_t       foBackoffMs;
-    double         foBackoffFactor;
-    uint32_t       foErrorClasses;
-    uint32_t       foDebounceMs; /* debounce window for coalescing callbacks */
+    uint32_t foMaxAttempts;
+    uint32_t foBackoffMs;
+    double foBackoffFactor;
+    uint32_t foErrorClasses;
+    uint32_t foDebounceMs; /* debounce window for coalescing callbacks */
 
     /* Failover callback + dispatch context */
-    Tcl_Obj       *failoverCallback;
-    Tcl_Interp    *ownerIp;
-    Tcl_ThreadId   ownerTid;
+    Tcl_Obj* failoverCallback;
+    Tcl_Interp* ownerIp;
+    Tcl_ThreadId ownerTid;
 
     /* Coalescing state */
     Tcl_TimerToken foTimer;
-    int            foTimerScheduled;
-    Tcl_Obj       *foPendingMsg;
+    int foTimerScheduled;
+    Tcl_Obj* foPendingMsg;
 
     /* Cross-interp adoption control:
        - ownerClose: the interpreter that created the connection will perform dpiConn_close().
        - adopters only dpiConn_release() their addRef'ed handle. */
-    int            ownerClose;
+    int ownerClose;
 } OradpiConn;
 
-typedef struct OradpiStmt {
-    OradpiBase   base;
-    OradpiConn  *owner;
-    dpiStmt     *stmt;
-    uint32_t     fetchArray;
+typedef struct OradpiStmt
+{
+    OradpiBase base;
+    OradpiConn* owner;
+    dpiStmt* stmt;
+    uint32_t fetchArray;
 
-    uint32_t     numCols;
-    int          defined;
-
-    Tcl_Mutex    asyncMutex;
-    int          asyncRunning;
-    int          asyncDone;
-    int          asyncRc;
-    uint32_t     asyncCols;
-    Tcl_ThreadId asyncTid;
+    uint32_t numCols;
+    int defined;
+    int executedInParse; /* set when oraparse auto-executes a no-bind query */
 } OradpiStmt;
 
-typedef struct OradpiLob {
+typedef struct OradpiLob
+{
     OradpiBase base;
-    dpiLob    *lob;
+    dpiLob* lob;
 } OradpiLob;
 
-typedef struct OradpiInterpState {
-    Tcl_Interp   *ip;
+typedef struct OradpiInterpState
+{
+    Tcl_Interp* ip;
     Tcl_HashTable conns;
     Tcl_HashTable stmts;
     Tcl_HashTable lobs;
 } OradpiInterpState;
 
-OradpiLob *Oradpi_LookupLob(Tcl_Interp *ip, Tcl_Obj *nameObj);
+OradpiLob* Oradpi_LookupLob(Tcl_Interp* ip, Tcl_Obj* nameObj);
 
 #endif /* ORATCL_ODPI_STATE_H */

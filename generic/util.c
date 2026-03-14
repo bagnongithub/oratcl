@@ -13,6 +13,8 @@
  *
  */
 
+#include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 #include <tcl.h>
 
@@ -23,43 +25,49 @@
  * Forward Declarations
  * ========================================================================== */
 
-static int         Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags);
-static void        Oradpi_FailoverTimerProc(void *clientData);
-int                Oradpi_IsNumberObj(Tcl_Obj *o, long long *asInt, double *asDbl, int *isInt);
-Tcl_Obj           *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix);
-static void        Oradpi_PostFailoverEvent(OradpiConn *co, Tcl_Obj *message);
-void               Oradpi_RecordRows(OradpiBase *h, uint64_t rows);
-int                Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int code, const char *msg);
-int                Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *where);
-void               Oradpi_UpdateStmtType(OradpiStmt *s);
-static void        ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val);
+static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags);
+static void Oradpi_FailoverTimerProc(void* clientData);
+int Oradpi_IsNumberObj(Tcl_Obj* o, long long* asInt, double* asDbl, int* isInt);
+Tcl_Obj* Oradpi_NewHandleName(Tcl_Interp* ip, const char* prefix);
+static void Oradpi_PostFailoverEvent(OradpiConn* co, Tcl_Obj* message);
+void Oradpi_RecordRows(OradpiBase* h, uint64_t rows);
+int Oradpi_SetError(Tcl_Interp* ip, OradpiBase* h, int code, const char* msg);
+int Oradpi_SetErrorFromODPI(Tcl_Interp* ip, OradpiBase* h, const char* where);
+int Oradpi_SetErrorFromODPIInfo(Tcl_Interp* ip, OradpiBase* h, const char* where, const dpiErrorInfo* ei);
+void Oradpi_UpdateStmtType(OradpiStmt* s);
+static void ReplaceObj(Tcl_Obj** slot, Tcl_Obj* val);
 
 /* ------------------------------------------------------------------------- *
  * Stuff
  * ------------------------------------------------------------------------- */
 
-static Tcl_Mutex   gHandleMutex;
+/* gHandleMutex: protects the static 'counter' in Oradpi_NewHandleName.
+ * Lock ordering: leaf lock, no other locks held while this is held. */
+static Tcl_Mutex gHandleMutex;
 
-extern dpiContext *Oradpi_GlobalDpiContext;
+extern dpiContext* Oradpi_GlobalDpiContext;
 
-Tcl_Obj           *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix) {
-    static int counter = 0;
+Tcl_Obj* Oradpi_NewHandleName(Tcl_Interp* ip, const char* prefix)
+{
+    (void)ip;
+    static uint64_t counter = 0;
 
     Tcl_MutexLock(&gHandleMutex);
-    int id = ++counter;
+    uint64_t id = ++counter;
     Tcl_MutexUnlock(&gHandleMutex);
-    Tcl_Obj *name = Tcl_NewStringObj(prefix, -1);
-    Tcl_AppendToObj(name, Tcl_GetString(Tcl_NewLongObj((Tcl_WideInt)id)), -1);
-    return name;
+    return Tcl_ObjPrintf("%s%" PRIu64, prefix, id);
 }
 
-int Oradpi_IsNumberObj(Tcl_Obj *o, long long *asInt, double *asDbl, int *isInt) {
-    if (Tcl_GetWideIntFromObj(NULL, o, asInt) == TCL_OK) {
+int Oradpi_IsNumberObj(Tcl_Obj* o, long long* asInt, double* asDbl, int* isInt)
+{
+    if (Tcl_GetWideIntFromObj(NULL, o, asInt) == TCL_OK)
+    {
         if (isInt)
             *isInt = 1;
         return 1;
     }
-    if (Tcl_GetDoubleFromObj(NULL, o, asDbl) == TCL_OK) {
+    if (Tcl_GetDoubleFromObj(NULL, o, asDbl) == TCL_OK)
+    {
         if (isInt)
             *isInt = 0;
         return 1;
@@ -67,12 +75,14 @@ int Oradpi_IsNumberObj(Tcl_Obj *o, long long *asInt, double *asDbl, int *isInt) 
     return 0;
 }
 
-void Oradpi_RecordRows(OradpiBase *h, uint64_t rows) {
+void Oradpi_RecordRows(OradpiBase* h, uint64_t rows)
+{
     if (h)
         h->msg.rows = rows;
 }
 
-static void ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val) {
+static void ReplaceObj(Tcl_Obj** slot, Tcl_Obj* val)
+{
     if (val)
         Tcl_IncrRefCount(val);
     if (*slot)
@@ -80,7 +90,8 @@ static void ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val) {
     *slot = val;
 }
 
-void Oradpi_UpdateStmtType(OradpiStmt *s) {
+void Oradpi_UpdateStmtType(OradpiStmt* s)
+{
     if (!s || !s->stmt)
         return;
     dpiStmtInfo info;
@@ -100,53 +111,75 @@ void Oradpi_UpdateStmtType(OradpiStmt *s) {
     s->base.msg.sqltype = t;
 }
 
-typedef struct OradpiFailoverEvent {
-    Tcl_Event   header;
-    Tcl_Interp *ip;      /* owning interp */
-    Tcl_Obj    *ldaName; /* connection handle name */
-    Tcl_Obj    *message; /* error text */
+typedef struct OradpiFailoverEvent
+{
+    Tcl_Event header;
+    Tcl_Interp* ip;   /* owning interp */
+    Tcl_Obj* ldaName; /* connection handle name */
+    Tcl_Obj* message; /* error text */
 } OradpiFailoverEvent;
 
-static void Oradpi_FailoverTimerProc(void *clientData) {
-    OradpiConn *co       = (OradpiConn *)clientData;
-    co->foTimer          = NULL;
+static void Oradpi_FailoverTimerProc(void* clientData)
+{
+    OradpiConn* co = (OradpiConn*)clientData;
+    if (!co)
+        return;
+    co->foTimer = NULL;
     co->foTimerScheduled = 0;
 
-    if (!co || !co->ownerIp || !co->failoverCallback) {
-        if (co && co->foPendingMsg) {
+    if (!co->ownerIp || !co->failoverCallback)
+    {
+        if (co->foPendingMsg)
+        {
             Tcl_DecrRefCount(co->foPendingMsg);
             co->foPendingMsg = NULL;
         }
         return;
     }
-    if (Tcl_InterpDeleted(co->ownerIp)) {
-        if (co->foPendingMsg) {
+    if (Tcl_InterpDeleted(co->ownerIp))
+    {
+        if (co->foPendingMsg)
+        {
             Tcl_DecrRefCount(co->foPendingMsg);
             co->foPendingMsg = NULL;
         }
         return;
     }
 
-    Tcl_Obj *cmd = Tcl_DuplicateObj(co->failoverCallback);
+    /* cmd is freshly duplicated (refcount 1, unshared) — Tcl_ListObjAppendElement
+     * cannot fail on an unshared list, but we check for defensive correctness. */
+    Tcl_Obj* cmd = Tcl_DuplicateObj(co->failoverCallback);
     Tcl_IncrRefCount(cmd);
-    Tcl_ListObjAppendElement(co->ownerIp, cmd, co->base.name);
-    Tcl_ListObjAppendElement(co->ownerIp, cmd, Tcl_NewStringObj("recoverable", -1));
-    Tcl_ListObjAppendElement(co->ownerIp, cmd, co->foPendingMsg ? co->foPendingMsg : Tcl_NewStringObj("", -1));
+    if (Tcl_ListObjAppendElement(co->ownerIp, cmd, co->base.name) != TCL_OK ||
+        Tcl_ListObjAppendElement(co->ownerIp, cmd, Tcl_NewStringObj("recoverable", -1)) != TCL_OK ||
+        Tcl_ListObjAppendElement(co->ownerIp, cmd, co->foPendingMsg ? co->foPendingMsg : Tcl_NewStringObj("", -1)) != TCL_OK)
+    {
+        Tcl_DecrRefCount(cmd);
+        if (co->foPendingMsg)
+        {
+            Tcl_DecrRefCount(co->foPendingMsg);
+            co->foPendingMsg = NULL;
+        }
+        return;
+    }
 
     (void)Tcl_EvalObjEx(co->ownerIp, cmd, TCL_EVAL_GLOBAL);
     Tcl_DecrRefCount(cmd);
 
-    if (co->foPendingMsg) {
+    if (co->foPendingMsg)
+    {
         Tcl_DecrRefCount(co->foPendingMsg);
         co->foPendingMsg = NULL;
     }
 }
 
-static int Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags) {
+static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags)
+{
     (void)flags;
-    OradpiFailoverEvent *fe = (OradpiFailoverEvent *)evPtr;
+    OradpiFailoverEvent* fe = (OradpiFailoverEvent*)evPtr;
 
-    if (!fe->ip || Tcl_InterpDeleted(fe->ip)) {
+    if (!fe->ip || Tcl_InterpDeleted(fe->ip))
+    {
         if (fe->ip)
             Tcl_Release(fe->ip);
         if (fe->ldaName)
@@ -157,8 +190,9 @@ static int Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags) {
     }
 
     /* Resolve connection in the owning interp */
-    OradpiConn *co = Oradpi_LookupConn(fe->ip, fe->ldaName);
-    if (!co) {
+    OradpiConn* co = Oradpi_LookupConn(fe->ip, fe->ldaName);
+    if (!co)
+    {
         Tcl_Release(fe->ip);
         Tcl_DecrRefCount(fe->ldaName);
         Tcl_DecrRefCount(fe->message);
@@ -172,9 +206,10 @@ static int Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags) {
     Tcl_IncrRefCount(co->foPendingMsg);
 
     /* Start debounce timer if not already scheduled */
-    if (!co->foTimerScheduled) {
-        int delay            = (int)(co->foDebounceMs ? co->foDebounceMs : 250);
-        co->foTimer          = Tcl_CreateTimerHandler(delay, Oradpi_FailoverTimerProc, co);
+    if (!co->foTimerScheduled)
+    {
+        int delay = (int)(co->foDebounceMs ? co->foDebounceMs : 250);
+        co->foTimer = Tcl_CreateTimerHandler(delay, Oradpi_FailoverTimerProc, co);
         co->foTimerScheduled = 1;
     }
 
@@ -184,14 +219,15 @@ static int Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags) {
     return 1;
 }
 
-static void Oradpi_PostFailoverEvent(OradpiConn *co, Tcl_Obj *message) {
+static void Oradpi_PostFailoverEvent(OradpiConn* co, Tcl_Obj* message)
+{
     if (!co || !co->ownerIp || !co->ownerTid)
         return;
 
-    OradpiFailoverEvent *fe = (OradpiFailoverEvent *)Tcl_Alloc(sizeof(*fe));
+    OradpiFailoverEvent* fe = (OradpiFailoverEvent*)Tcl_Alloc(sizeof(*fe));
     memset(fe, 0, sizeof(*fe));
     fe->header.proc = Oradpi_FailoverEventProc;
-    fe->ip          = co->ownerIp;
+    fe->ip = co->ownerIp;
     Tcl_Preserve(fe->ip);
     fe->ldaName = co->base.name;
     Tcl_IncrRefCount(fe->ldaName);
@@ -201,54 +237,72 @@ static void Oradpi_PostFailoverEvent(OradpiConn *co, Tcl_Obj *message) {
     Tcl_ThreadAlert(co->ownerTid);
 }
 
-int Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *where) {
-    dpiErrorInfo ei;
-    dpiContext_getError(Oradpi_GlobalDpiContext, &ei);
-
-    if (h) {
-        h->msg.rc          = (int)ei.code;
-        h->msg.ocicode     = (int)ei.code;
-        h->msg.recoverable = (ei.isRecoverable ? 1 : 0);
-        h->msg.offset      = ei.offset;
-        ReplaceObj(&h->msg.fn, Tcl_NewStringObj(where ? where : "ODPI", -1));
-        ReplaceObj(&h->msg.sqlstate, Tcl_NewStringObj(ei.sqlState ? ei.sqlState : "", -1));
-        ReplaceObj(&h->msg.action, NULL);
-        ReplaceObj(&h->msg.error, Tcl_NewStringObj(ei.message ? ei.message : "ODPI error", -1));
+int Oradpi_SetErrorFromODPIInfo(Tcl_Interp* ip, OradpiBase* h, const char* where, const dpiErrorInfo* ei)
+{
+    if (h)
+    {
+        h->msg.rc = (int)ei->code;
+        h->msg.ocicode = (int)ei->code;
+        h->msg.recoverable = (ei->isRecoverable ? 1 : 0);
+        h->msg.warning = (ei->isWarning ? 1 : 0);
+        h->msg.offset = ei->offset;
+        h->msg.peo = ei->offset;
+        /* Map ei->fnName to msg.fn (ODPI function that triggered the error) */
+        ReplaceObj(&h->msg.fn, Tcl_NewStringObj(ei->fnName ? ei->fnName : (where ? where : "ODPI"), -1));
+        ReplaceObj(&h->msg.sqlstate, Tcl_NewStringObj(ei->sqlState ? ei->sqlState : "", -1));
+        ReplaceObj(&h->msg.action, Tcl_NewStringObj(ei->action ? ei->action : "", -1));
+        ReplaceObj(&h->msg.error, Tcl_NewStringObj(ei->message ? ei->message : "ODPI error", -1));
     }
 
-    if (h && ei.isRecoverable) {
-        OradpiConn *co    = NULL;
-        const char *hname = h->name ? Tcl_GetString(h->name) : NULL;
-        if (hname && strncmp(hname, "oraL", 4) == 0) {
-            co = (OradpiConn *)h;
-        } else if (hname && strncmp(hname, "oraS", 4) == 0) {
-            OradpiStmt *s = (OradpiStmt *)(void *)h;
-            co            = s->owner;
+    if (h && ei->isRecoverable)
+    {
+        OradpiConn* co = NULL;
+        const char* hname = h->name ? Tcl_GetString(h->name) : NULL;
+        if (hname && strncmp(hname, "oraL", 4) == 0)
+        {
+            co = (OradpiConn*)h;
         }
-        if (co && co->failoverCallback) {
-            Tcl_Obj *msg = Tcl_NewStringObj(ei.message ? ei.message : "recoverable error", -1);
+        else if (hname && strncmp(hname, "oraS", 4) == 0)
+        {
+            OradpiStmt* s = (OradpiStmt*)(void*)h;
+            co = s->owner;
+        }
+        if (co && co->failoverCallback)
+        {
+            Tcl_Obj* msg = Tcl_NewStringObj(ei->message ? ei->message : "recoverable error", -1);
+            /* PostFailoverEvent takes ownership of the refcount */
             Oradpi_PostFailoverEvent(co, msg);
-            Tcl_DecrRefCount(msg);
         }
     }
 
-    if (ip) {
-        Tcl_Obj *res = Tcl_NewStringObj(ei.message ? ei.message : "ODPI error", -1);
+    if (ip)
+    {
+        Tcl_Obj* res = Tcl_NewStringObj(ei->message ? ei->message : "ODPI error", -1);
         Tcl_SetObjResult(ip, res);
         Tcl_SetErrorCode(ip, "ORATCL", "ODPI", where ? where : "ODPI", NULL);
     }
     return TCL_ERROR;
 }
 
-int Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int code, const char *msg) {
-    if (h) {
-        h->msg.rc          = code;
-        h->msg.ocicode     = code;
+int Oradpi_SetErrorFromODPI(Tcl_Interp* ip, OradpiBase* h, const char* where)
+{
+    dpiErrorInfo ei;
+    dpiContext_getError(Oradpi_GlobalDpiContext, &ei);
+    return Oradpi_SetErrorFromODPIInfo(ip, h, where, &ei);
+}
+
+int Oradpi_SetError(Tcl_Interp* ip, OradpiBase* h, int code, const char* msg)
+{
+    if (h)
+    {
+        h->msg.rc = code;
+        h->msg.ocicode = code;
         h->msg.recoverable = 0;
         ReplaceObj(&h->msg.fn, Tcl_NewStringObj("Oratcl", -1));
         ReplaceObj(&h->msg.error, Tcl_NewStringObj(msg ? msg : "error", -1));
     }
-    if (ip) {
+    if (ip)
+    {
         Tcl_SetObjResult(ip, Tcl_NewStringObj(msg ? msg : "error", -1));
         Tcl_SetErrorCode(ip, "ORATCL", "CLIENT", NULL);
     }

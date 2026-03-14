@@ -80,7 +80,7 @@ ul { margin: 10px 0 10px 20px; }
 <li><a href='#orabind-stmt-name-value'>orabind stmt :name value ...</a></li>
 <li><a href='#orabindexec-stmt--commit--arraydml-name-list'>orabindexec stmt ?-commit? ?-arraydml? :name list ...</a></li>
 <li><a href='#oracols-stmt'>oracols stmt</a></li>
-<li><a href='#oradesc-stmt'>oradesc stmt</a></li>
+<li><a href='#oradesc-logon-handle-object-name'>oradesc logon-handle object-name</a></li>
 <li><a href='#oraexec-stmt--commit'>oraexec stmt ?-commit?</a></li>
 <li><a href='#oraexecasync-stmt--commit'>oraexecasync stmt ?-commit?</a></li>
 <li><a href='#orafetch-stmt-options'>orafetch stmt ?options?</a></li>
@@ -99,7 +99,7 @@ ul { margin: 10px 0 10px 20px; }
 <p>oratcl - Tcl 9 interface to Oracle via ODPI-C 5.6.2</p>
 <p></p>
 <h2 id='synopsis'>SYNOPSIS</h2>
-<pre><code>oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|force?
+<pre><code>oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|forceget|timedwait? ?-failovercallback proc?
 oralogoff logon-handle
 
 oraopen   logon-handle           # open a statement handle
@@ -125,7 +125,7 @@ orafetch statement-handle
          ?-asdict?
 
 oracols statement-handle
-oradesc statement-handle           # {name type} pairs
+oradesc logon-handle object-name
 
 oramsg  handle rc|error|rows|peo|ocicode|sqltype|fn|action|sqlstate|recoverable|warning|offset|all|allx
 
@@ -151,7 +151,8 @@ workers with proper addRef/release of underlying dpi handles.</p>
 <div class='indent'>
 <p><b>&quot;-pool</b> Create/acquire via session pool.</p>
 <p><b>&quot;-homogeneous</b> Homogeneous pool (default 1).</p>
-<p><b>&quot;-getmode</b> Pool get mode.</p>
+<p><b>&quot;-getmode</b> wait|nowait|forceget|timedwait Pool get mode.</p>
+<p><b>&quot;-failovercallback</b> Register a Tcl proc invoked on recoverable errors (driver-side failover).</p>
 </div>
 <p>Returns a logon-handle (e.g. "oraL1").</p>
 <p></p>
@@ -189,8 +190,8 @@ workers with proper addRef/release of underlying dpi handles.</p>
 <dl class='deflist'>
 <dt id='oracols-stmt'><b>oracols</b> <i>stmt</i></dt>
 <dd><p>Return column names of the current query.</p></dd>
-<dt id='oradesc-stmt'><b>oradesc</b> <i>stmt</i></dt>
-<dd><p>Return <b>{name type}</b> pairs.</p></dd>
+<dt id='oradesc-logon-handle-object-name'><b>oradesc</b> <i>logon-handle</i> <i>object-name</i></dt>
+<dd><p>Return <b>{name type}</b> pairs for the columns of the given table or view.</p></dd>
 </dl>
 <h3 id='lobs'>LOBs</h3>
 <dl class='deflist'>
