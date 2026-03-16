@@ -19,12 +19,20 @@
 #define ORATCL_ODPI_STATE_H
 
 #include <stdint.h>
+#ifndef USE_TCL_STUBS
+#define USE_TCL_STUBS
+#endif
 #include <tcl.h>
 
 #include "dpi.h"
 
 #ifndef DPI_DEFAULT_FETCH_ARRAY_SIZE
 #define DPI_DEFAULT_FETCH_ARRAY_SIZE 100
+#endif
+
+/* M-2: Guard against ODPI-C versions that don't define this macro */
+#ifndef DPI_DEFAULT_PREFETCH_ROWS
+#define DPI_DEFAULT_PREFETCH_ROWS 2
 #endif
 
 #ifndef BINDSTORE_ASSOC
@@ -104,6 +112,7 @@ typedef struct OradpiStmt
     OradpiConn* owner;
     dpiStmt* stmt;
     uint32_t fetchArray;
+    uint32_t prefetchRows; /* per-statement override; 0 = use connection default */
 
     uint32_t numCols;
     int defined;

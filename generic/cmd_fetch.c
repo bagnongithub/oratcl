@@ -32,7 +32,7 @@ static Tcl_Obj* upper_copy(const char* s, uint32_t n);
 static Tcl_Obj* ValueToObj(Tcl_Interp* ip, OradpiStmt* st, dpiNativeTypeNum nt, dpiData* d, int colIsChar);
 
 /* ------------------------------------------------------------------------- *
- * Stuff
+ * Implementation
  * ------------------------------------------------------------------------- */
 
 static int is_char_type(dpiOracleTypeNum otn)
@@ -52,21 +52,16 @@ static int is_char_type(dpiOracleTypeNum otn)
     }
 }
 
+/* m-3: Use Tcl_UtfToUpper for Unicode-aware uppercasing of column names.
+ * Oracle column names may contain accented characters in NLS configurations. */
 static Tcl_Obj* upper_copy(const char* s, uint32_t n)
 {
-    /* Build uppercased string in a stack buffer to avoid mutating
-     * Tcl_Obj's internal string rep in-place (fix 3.1) */
-    char stack[256];
-    char* buf = (n < sizeof(stack)) ? stack : (char*)Tcl_Alloc(n + 1);
-    for (uint32_t i = 0; i < n; i++)
-    {
-        char ch = s[i];
-        buf[i] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 'a' + 'A') : ch;
-    }
-    buf[n] = '\0';
-    Tcl_Obj* o = Tcl_NewStringObj(buf, (Tcl_Size)n);
-    if (buf != stack)
-        Tcl_Free(buf);
+    Tcl_DString ds;
+    Tcl_DStringInit(&ds);
+    Tcl_DStringAppend(&ds, s, (Tcl_Size)n);
+    Tcl_UtfToUpper(Tcl_DStringValue(&ds));
+    Tcl_Obj* o = Tcl_NewStringObj(Tcl_DStringValue(&ds), Tcl_DStringLength(&ds));
+    Tcl_DStringFree(&ds);
     return o;
 }
 
@@ -168,31 +163,44 @@ static Tcl_Obj* ValueToObj(Tcl_Interp* ip, OradpiStmt* st, dpiNativeTypeNum nt, 
 
             uint64_t sizeCharsOrBytes = 0;
             if (dpiLob_getSize(lob, &sizeCharsOrBytes) != DPI_SUCCESS)
-                return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiLob_getSize"), NULL;
+            {
+                Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiLob_getSize");
+                return NULL;
+            }
             if (sizeCharsOrBytes == 0)
                 return Tcl_NewObj();
 
             uint64_t capBytes = 0;
             if (dpiLob_getBufferSize(lob, sizeCharsOrBytes, &capBytes) != DPI_SUCCESS)
-                return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiLob_getBufferSize"), NULL;
+            {
+                Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiLob_getBufferSize");
+                return NULL;
+            }
 
+            /* M-5 fix: reject inline LOBs exceeding the safety cap instead of
+             * silently truncating.  Users should disable inlineLobs and use
+             * oralob read -amount to fetch large LOBs in chunks. */
             const uint64_t MAX_INLINE = (1u << 20);
             if (capBytes > MAX_INLINE && capBytes > 0)
             {
-                uint64_t scaledChars = (sizeCharsOrBytes * MAX_INLINE) / capBytes;
-                if (scaledChars == 0)
-                    scaledChars = 1;
-                sizeCharsOrBytes = scaledChars;
-                if (dpiLob_getBufferSize(lob, sizeCharsOrBytes, &capBytes) != DPI_SUCCESS)
-                    return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiLob_getBufferSize"), NULL;
+                Oradpi_SetError(ip,
+                                (OradpiBase*)st,
+                                -1,
+                                "LOB value exceeds 1 MB inline limit; "
+                                "disable inlineLobs and use oralob read -amount for large values");
+                return NULL;
             }
 
-            char* buf = (char*)Tcl_Alloc((size_t)capBytes);
+            size_t bufBytes = 0;
+            if (Oradpi_CheckedU64ToSizeT(ip, capBytes, &bufBytes, "inline LOB buffer") != TCL_OK)
+                return NULL;
+            char* buf = (char*)Tcl_Alloc(bufBytes);
             uint64_t gotBytes = capBytes;
             if (dpiLob_readBytes(lob, 1, sizeCharsOrBytes, buf, &gotBytes) != DPI_SUCCESS)
             {
                 Tcl_Free(buf);
-                return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiLob_readBytes"), NULL;
+                Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiLob_readBytes");
+                return NULL;
             }
 
             Tcl_Obj* out = colIsChar ? Tcl_NewStringObj(buf, (Tcl_Size)gotBytes)
@@ -205,6 +213,18 @@ static Tcl_Obj* ValueToObj(Tcl_Interp* ip, OradpiStmt* st, dpiNativeTypeNum nt, 
     }
 }
 
+/*
+ * orafetch statement-handle ?-datavariable varName? ?-dataarray arrName?
+ *         ?-indexbyname? ?-indexbynumber? ?-command script? ?-max N?
+ *         ?-resultvariable varName? ?-returnrows? ?-asdict?
+ *
+ *   Fetches rows from a previously executed query. By default returns all
+ *   rows as a Tcl list of row-lists. Options control variable binding,
+ *   per-row callbacks, and result format (dict, array, etc.).
+ *   Returns: row list (default), 0 (rows fetched), or 1403 (no data found).
+ *   Errors:  ODPI-C fetch errors; invalid handle; async busy.
+ *   Thread-safety: safe — per-interp state only; blocks if async busy.
+ */
 int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
     (void)cd;
@@ -325,9 +345,7 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     }
 
     if (!returnRows && maxRows <= 0)
-    {
         maxRows = 1;
-    }
 
     uint32_t numCols = 0;
     if (dpiStmt_getNumQueryColumns(st->stmt, &numCols) != DPI_SUCCESS)
@@ -339,26 +357,41 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         return TCL_OK;
     }
 
+    Tcl_Size numColsSize = (Tcl_Size)numCols;
     Tcl_Obj** colNames = NULL;
+    Tcl_Obj** colVals = NULL;
+    Tcl_Obj** numberKeys = NULL;
+    int* colIsChar = NULL;
+    Tcl_Obj* rowsList = NULL;
+    Tcl_Obj* rowObj = NULL;
+    uint64_t fetched = 0;
+    int code = TCL_OK;
+
     int needNames = (asDict || (dataArray && indexByName));
-    int* colIsChar = (int*)Tcl_Alloc(numCols * sizeof(int));
+    size_t colIsCharBytes = 0;
+    if (Oradpi_CheckedAllocBytes(ip, numColsSize, sizeof(int), &colIsCharBytes, "column metadata") != TCL_OK)
+        return TCL_ERROR;
+    colIsChar = (int*)Tcl_Alloc(colIsCharBytes);
+
     if (needNames)
-        colNames = (Tcl_Obj**)Tcl_Alloc(numCols * sizeof(Tcl_Obj*));
-    /* Single-pass column metadata (fix 4.4) */
+    {
+        size_t colNameBytes = 0;
+        if (Oradpi_CheckedAllocBytes(ip, numColsSize, sizeof(Tcl_Obj*), &colNameBytes, "column name array") != TCL_OK)
+        {
+            code = TCL_ERROR;
+            goto cleanup;
+        }
+        colNames = (Tcl_Obj**)Tcl_Alloc(colNameBytes);
+        memset(colNames, 0, colNameBytes);
+    }
+
     for (uint32_t c = 1; c <= numCols; c++)
     {
         dpiQueryInfo qi;
         if (dpiStmt_getQueryInfo(st->stmt, c, &qi) != DPI_SUCCESS)
         {
-            /* Clean up any colNames already allocated (fix 2.5 partial alloc) */
-            if (colNames)
-            {
-                for (uint32_t k = 1; k < c; k++)
-                    Tcl_DecrRefCount(colNames[k - 1]);
-                Tcl_Free((char*)colNames);
-            }
-            Tcl_Free((char*)colIsChar);
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_getQueryInfo");
+            code = Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_getQueryInfo");
+            goto cleanup;
         }
         colIsChar[c - 1] = is_char_type(qi.typeInfo.oracleTypeNum);
         if (needNames)
@@ -368,211 +401,104 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         }
     }
 
-    if (!returnRows && maxRows == 1)
+    size_t colValBytes = 0;
+    if (Oradpi_CheckedAllocBytes(ip, numColsSize, sizeof(Tcl_Obj*), &colValBytes, "fetched row value array") != TCL_OK)
     {
-        int hasRow = 0;
-        uint32_t bufferRowIndex = 0;
-        if (dpiStmt_fetch(st->stmt, &hasRow, &bufferRowIndex) != DPI_SUCCESS)
+        code = TCL_ERROR;
+        goto cleanup;
+    }
+    colVals = (Tcl_Obj**)Tcl_Alloc(colValBytes);
+    memset(colVals, 0, colValBytes); /* M-2 fix: zero so cleanup can identify populated entries */
+
+    if (dataArray && indexByNumber)
+    {
+        size_t keyBytes = 0;
+        if (Oradpi_CheckedAllocBytes(ip, numColsSize, sizeof(Tcl_Obj*), &keyBytes, "numeric column keys") != TCL_OK)
         {
-            if (colNames)
-            {
-                for (uint32_t i = 0; i < numCols; i++)
-                    Tcl_DecrRefCount(colNames[i]);
-                Tcl_Free((char*)colNames);
-            }
-            Tcl_Free((char*)colIsChar);
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_fetch");
+            code = TCL_ERROR;
+            goto cleanup;
         }
-        if (!hasRow)
+        numberKeys = (Tcl_Obj**)Tcl_Alloc(keyBytes);
+        memset(numberKeys, 0, keyBytes);
+        for (uint32_t c = 0; c < numCols; c++)
         {
-            if (colNames)
-            {
-                for (uint32_t i = 0; i < numCols; i++)
-                    Tcl_DecrRefCount(colNames[i]);
-                Tcl_Free((char*)colNames);
-            }
-            Tcl_Free((char*)colIsChar);
-            Tcl_SetObjResult(ip, Tcl_NewIntObj(1403));
-            return TCL_OK;
+            numberKeys[c] = Tcl_ObjPrintf("%u", c + 1);
+            Tcl_IncrRefCount(numberKeys[c]);
         }
-        Tcl_Obj* rowObj = Tcl_NewListObj(0, NULL);
-        for (uint32_t c = 1; c <= numCols; c++)
-        {
-            dpiNativeTypeNum nt;
-            dpiData* d = NULL;
-            if (dpiStmt_getQueryValue(st->stmt, c, &nt, &d) != DPI_SUCCESS)
-            {
-                if (colNames)
-                {
-                    for (uint32_t i = 0; i < numCols; i++)
-                        Tcl_DecrRefCount(colNames[i]);
-                    Tcl_Free((char*)colNames);
-                }
-                Tcl_Free((char*)colIsChar);
-                return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_getQueryValue");
-            }
-            Tcl_Obj* v = ValueToObj(ip, st, nt, d, colIsChar[c - 1]);
-            if (!v)
-            {
-                if (colNames)
-                {
-                    for (uint32_t i = 0; i < numCols; i++)
-                        Tcl_DecrRefCount(colNames[i]);
-                    Tcl_Free((char*)colNames);
-                }
-                Tcl_Free((char*)colIsChar);
-                return TCL_ERROR;
-            }
-            if (asDict)
-            {
-                Tcl_ListObjAppendElement(ip, rowObj, colNames[c - 1]);
-                Tcl_ListObjAppendElement(ip, rowObj, v);
-            }
-            else
-            {
-                Tcl_ListObjAppendElement(ip, rowObj, v);
-            }
-        }
-        if (dataVar && !Tcl_ObjSetVar2(ip, dataVar, NULL, rowObj, TCL_LEAVE_ERR_MSG))
-        {
-            if (colNames)
-            {
-                for (uint32_t i = 0; i < numCols; i++)
-                    Tcl_DecrRefCount(colNames[i]);
-                Tcl_Free((char*)colNames);
-            }
-            Tcl_Free((char*)colIsChar);
-            return TCL_ERROR;
-        }
-        if (cmd)
-        {
-            Tcl_IncrRefCount(rowObj);
-            int code = Tcl_EvalObjEx(ip, cmd, TCL_EVAL_GLOBAL);
-            Tcl_DecrRefCount(rowObj);
-            if (code != TCL_OK)
-            {
-                if (colNames)
-                {
-                    for (uint32_t i = 0; i < numCols; i++)
-                        Tcl_DecrRefCount(colNames[i]);
-                    Tcl_Free((char*)colNames);
-                }
-                Tcl_Free((char*)colIsChar);
-                return code;
-            }
-        }
-        if (colNames)
-        {
-            for (uint32_t i = 0; i < numCols; i++)
-                Tcl_DecrRefCount(colNames[i]);
-            Tcl_Free((char*)colNames);
-        }
-        Tcl_Free((char*)colIsChar);
-        Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
-        return TCL_OK;
     }
 
-    Tcl_Obj* rowsList = NULL;
     if (returnRows)
     {
         rowsList = Tcl_NewListObj(0, NULL);
         Tcl_IncrRefCount(rowsList);
     }
 
-    uint64_t fetched = 0;
-    /* Allocate colVals once outside loop to avoid per-row malloc/free (fix 4.1) */
-    Tcl_Obj** colVals = (Tcl_Obj**)Tcl_Alloc(numCols * sizeof(Tcl_Obj*));
     for (;;)
     {
         int hasRow = 0;
         uint32_t bufferRowIndex = 0;
         if (dpiStmt_fetch(st->stmt, &hasRow, &bufferRowIndex) != DPI_SUCCESS)
         {
-            Tcl_Free((char*)colVals);
-            if (colNames)
-            {
-                for (uint32_t i = 0; i < numCols; i++)
-                    Tcl_DecrRefCount(colNames[i]);
-                Tcl_Free((char*)colNames);
-            }
-            Tcl_Free((char*)colIsChar);
-            if (rowsList)
-                Tcl_DecrRefCount(rowsList);
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_fetch");
+            code = Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_fetch");
+            goto cleanup;
         }
         if (!hasRow)
             break;
 
-        /* Extract all column values ONCE per row */
+        /* M-2 fix: zero colVals at the start of each row to prevent stale
+         * pointers from the previous iteration (which may have been freed
+         * when rowObj was DecrRefCount'd).  On error mid-column, cleanup
+         * can then safely identify only the current row's partial objects. */
+        memset(colVals, 0, sizeof(Tcl_Obj*) * numCols);
+
         for (uint32_t c = 1; c <= numCols; c++)
         {
             dpiNativeTypeNum nt;
             dpiData* d = NULL;
             if (dpiStmt_getQueryValue(st->stmt, c, &nt, &d) != DPI_SUCCESS)
             {
-                Tcl_Free((char*)colVals);
-                if (colNames)
-                {
-                    for (uint32_t i = 0; i < numCols; i++)
-                        Tcl_DecrRefCount(colNames[i]);
-                    Tcl_Free((char*)colNames);
-                }
-                Tcl_Free((char*)colIsChar);
-                if (rowsList)
-                    Tcl_DecrRefCount(rowsList);
-                return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_getQueryValue");
+                code = Oradpi_SetErrorFromODPI(ip, (OradpiBase*)st, "dpiStmt_getQueryValue");
+                goto cleanup;
             }
             colVals[c - 1] = ValueToObj(ip, st, nt, d, colIsChar[c - 1]);
             if (!colVals[c - 1])
             {
-                Tcl_Free((char*)colVals);
-                if (colNames)
-                {
-                    for (uint32_t i = 0; i < numCols; i++)
-                        Tcl_DecrRefCount(colNames[i]);
-                    Tcl_Free((char*)colNames);
-                }
-                Tcl_Free((char*)colIsChar);
-                if (rowsList)
-                    Tcl_DecrRefCount(rowsList);
-                return TCL_ERROR;
+                code = TCL_ERROR;
+                goto cleanup;
             }
         }
 
-        /* Build rowObj from extracted values */
-        Tcl_Obj* rowObj = Tcl_NewListObj(0, NULL);
+        rowObj = Tcl_NewListObj(0, NULL);
+        Tcl_IncrRefCount(rowObj);
         for (uint32_t c = 0; c < numCols; c++)
         {
             if (asDict)
-                Tcl_ListObjAppendElement(ip, rowObj, colNames[c]);
-            Tcl_ListObjAppendElement(ip, rowObj, colVals[c]);
+            {
+                if (Tcl_ListObjAppendElement(ip, rowObj, colNames[c]) != TCL_OK ||
+                    Tcl_ListObjAppendElement(ip, rowObj, colVals[c]) != TCL_OK)
+                {
+                    code = TCL_ERROR;
+                    goto cleanup;
+                }
+            }
+            else if (Tcl_ListObjAppendElement(ip, rowObj, colVals[c]) != TCL_OK)
+            {
+                code = TCL_ERROR;
+                goto cleanup;
+            }
         }
 
-        /* Populate dataArray from the same extracted values (no re-fetch) */
         if (dataArray)
         {
             if (indexByNumber)
             {
                 for (uint32_t c = 0; c < numCols; c++)
                 {
-                    Tcl_Obj* keyObj = Tcl_ObjPrintf("%u", c + 1);
-                    Tcl_IncrRefCount(keyObj);
-                    if (!Tcl_ObjSetVar2(ip, dataArray, keyObj, colVals[c], TCL_LEAVE_ERR_MSG))
+                    if (!Tcl_ObjSetVar2(ip, dataArray, numberKeys[c], colVals[c], TCL_LEAVE_ERR_MSG))
                     {
-                        Tcl_DecrRefCount(keyObj);
-                        Tcl_Free((char*)colVals);
-                        if (colNames)
-                        {
-                            for (uint32_t i = 0; i < numCols; i++)
-                                Tcl_DecrRefCount(colNames[i]);
-                            Tcl_Free((char*)colNames);
-                        }
-                        Tcl_Free((char*)colIsChar);
-                        if (rowsList)
-                            Tcl_DecrRefCount(rowsList);
-                        return TCL_ERROR;
+                        code = TCL_ERROR;
+                        goto cleanup;
                     }
-                    Tcl_DecrRefCount(keyObj);
                 }
             }
             else if (indexByName)
@@ -581,98 +507,103 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
                 {
                     if (!Tcl_ObjSetVar2(ip, dataArray, colNames[c], colVals[c], TCL_LEAVE_ERR_MSG))
                     {
-                        Tcl_Free((char*)colVals);
-                        if (colNames)
-                        {
-                            for (uint32_t i = 0; i < numCols; i++)
-                                Tcl_DecrRefCount(colNames[i]);
-                            Tcl_Free((char*)colNames);
-                        }
-                        Tcl_Free((char*)colIsChar);
-                        if (rowsList)
-                            Tcl_DecrRefCount(rowsList);
-                        return TCL_ERROR;
+                        code = TCL_ERROR;
+                        goto cleanup;
                     }
                 }
             }
         }
 
-        if (dataVar)
+        if (dataVar && !Tcl_ObjSetVar2(ip, dataVar, NULL, rowObj, TCL_LEAVE_ERR_MSG))
         {
-            if (!Tcl_ObjSetVar2(ip, dataVar, NULL, rowObj, TCL_LEAVE_ERR_MSG))
-            {
-                Tcl_Free((char*)colVals);
-                if (colNames)
-                {
-                    for (uint32_t i = 0; i < numCols; i++)
-                        Tcl_DecrRefCount(colNames[i]);
-                    Tcl_Free((char*)colNames);
-                }
-                Tcl_Free((char*)colIsChar);
-                if (rowsList)
-                    Tcl_DecrRefCount(rowsList);
-                return TCL_ERROR;
-            }
+            code = TCL_ERROR;
+            goto cleanup;
         }
+
         if (cmd)
         {
-            Tcl_IncrRefCount(rowObj);
-            int code = Tcl_EvalObjEx(ip, cmd, TCL_EVAL_GLOBAL);
-            Tcl_DecrRefCount(rowObj);
-            if (code != TCL_OK)
+            int evalCode = Tcl_EvalObjEx(ip, cmd, TCL_EVAL_GLOBAL);
+            if (evalCode != TCL_OK)
             {
-                Tcl_Free((char*)colVals);
-                if (colNames)
-                {
-                    for (uint32_t i = 0; i < numCols; i++)
-                        Tcl_DecrRefCount(colNames[i]);
-                    Tcl_Free((char*)colNames);
-                }
-                Tcl_Free((char*)colIsChar);
-                if (rowsList)
-                    Tcl_DecrRefCount(rowsList);
-                return code;
+                code = evalCode;
+                goto cleanup;
             }
         }
-        if (rowsList)
+
+        if (rowsList && Tcl_ListObjAppendElement(ip, rowsList, rowObj) != TCL_OK)
         {
-            Tcl_ListObjAppendElement(ip, rowsList, rowObj);
+            code = TCL_ERROR;
+            goto cleanup;
         }
+
+        Tcl_DecrRefCount(rowObj);
+        rowObj = NULL;
 
         fetched++;
         if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
             break;
     }
 
-    Tcl_Free((char*)colVals);
-    if (colNames)
-    {
-        for (uint32_t i = 0; i < numCols; i++)
-            Tcl_DecrRefCount(colNames[i]);
-        Tcl_Free((char*)colNames);
-    }
-    Tcl_Free((char*)colIsChar);
-
-    /* Fix 3.5: Check resultVar set return and handle rowsList lifetime correctly */
     if (resultVar)
     {
-        if (!Tcl_ObjSetVar2(ip, resultVar, NULL, rowsList ? rowsList : Tcl_NewListObj(0, NULL), TCL_LEAVE_ERR_MSG))
+        Tcl_Obj* resultObj = rowsList ? rowsList : Tcl_NewListObj(0, NULL);
+        if (!Tcl_ObjSetVar2(ip, resultVar, NULL, resultObj, TCL_LEAVE_ERR_MSG))
         {
-            if (rowsList)
-                Tcl_DecrRefCount(rowsList);
-            return TCL_ERROR;
+            code = TCL_ERROR;
+            goto cleanup;
         }
     }
+
     if (returnRows)
     {
         Tcl_SetObjResult(ip, rowsList ? rowsList : Tcl_NewListObj(0, NULL));
-        if (rowsList)
-            Tcl_DecrRefCount(rowsList);
-        return TCL_OK;
+        code = TCL_OK;
+        goto cleanup;
     }
-    if (rowsList)
-        Tcl_DecrRefCount(rowsList);
 
     Tcl_SetObjResult(ip, Tcl_NewIntObj(fetched > 0 ? 0 : 1403));
-    return TCL_OK;
+    code = TCL_OK;
+
+cleanup:
+    if (rowObj)
+        Tcl_DecrRefCount(rowObj);
+    if (rowsList)
+        Tcl_DecrRefCount(rowsList);
+    if (numberKeys)
+    {
+        for (uint32_t c = 0; c < numCols; c++)
+        {
+            if (numberKeys[c])
+                Tcl_DecrRefCount(numberKeys[c]);
+        }
+        Tcl_Free((char*)numberKeys);
+    }
+    if (colVals)
+    {
+        /* M-2 fix: release any Tcl_Obj* entries that were created by ValueToObj
+         * but never adopted by a list (refcount 0 after error mid-column).
+         * IncrRefCount+DecrRefCount is safe for both owned (refcount>0) and
+         * unowned (refcount 0) objects. */
+        for (uint32_t c = 0; c < numCols; c++)
+        {
+            if (colVals[c])
+            {
+                Tcl_IncrRefCount(colVals[c]);
+                Tcl_DecrRefCount(colVals[c]);
+            }
+        }
+        Tcl_Free((char*)colVals);
+    }
+    if (colNames)
+    {
+        for (uint32_t c = 0; c < numCols; c++)
+        {
+            if (colNames[c])
+                Tcl_DecrRefCount(colNames[c]);
+        }
+        Tcl_Free((char*)colNames);
+    }
+    if (colIsChar)
+        Tcl_Free((char*)colIsChar);
+    return code;
 }

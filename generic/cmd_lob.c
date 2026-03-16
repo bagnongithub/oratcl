@@ -25,7 +25,7 @@
 int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 
 /* ------------------------------------------------------------------------- *
- * Stuff
+ * Implementation
  * ------------------------------------------------------------------------- */
 
 static const char* const lobSubcmds[] = {"size", "read", "write", "trim", "close", NULL};
@@ -45,6 +45,16 @@ enum LobReadOptIdx
     LOBR_AMOUNT
 };
 
+/*
+ * oralob subcommand lob-handle ?args...?
+ *
+ *   Subcommands: size, read ?-offset N? ?-amount N?, write data ?-offset N?,
+ *   trim newSize, close.  Operates on LOB handles returned by orafetch when
+ *   inlineLobs is disabled.
+ *   Returns: size (size), byte data (read), 0 (write/trim/close).
+ *   Errors:  ODPI-C LOB errors; invalid handle; excessive read size (256 MB cap).
+ *   Thread-safety: safe — per-interp LOB registry.
+ */
 int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
     (void)cd;
@@ -91,9 +101,13 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
                 switch ((enum LobReadOptIdx)optIdx)
                 {
                     case LOBR_OFFSET:
+                        if (w < 1)
+                            return Oradpi_SetError(ip, (OradpiBase*)l, -1, "oralob read: -offset must be >= 1");
                         offset = (uint64_t)w;
                         break;
                     case LOBR_AMOUNT:
+                        if (w < 0)
+                            return Oradpi_SetError(ip, (OradpiBase*)l, -1, "oralob read: -amount must be >= 0");
                         amount = (uint64_t)w;
                         break;
                 }
@@ -126,7 +140,10 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
                                        "use -amount with smaller chunks");
             }
 
-            char* buf = (char*)Tcl_Alloc((size_t)capBytes);
+            size_t bufBytes = 0;
+            if (Oradpi_CheckedU64ToSizeT(ip, capBytes, &bufBytes, "oralob read buffer") != TCL_OK)
+                return TCL_ERROR;
+            char* buf = (char*)Tcl_Alloc(bufBytes);
             uint64_t gotBytes = capBytes;
             if (dpiLob_readBytes(l->lob, offset, amount, buf, &gotBytes) != DPI_SUCCESS)
             {
@@ -155,6 +172,8 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
                     Tcl_WideInt w;
                     if (Tcl_GetWideIntFromObj(ip, objv[++i], &w) != TCL_OK)
                         return TCL_ERROR;
+                    if (w < 1)
+                        return Oradpi_SetError(ip, (OradpiBase*)l, -1, "oralob write: -offset must be >= 1");
                     offset = (uint64_t)w;
                 }
                 else
@@ -175,6 +194,8 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             Tcl_WideInt w;
             if (Tcl_GetWideIntFromObj(ip, objv[3], &w) != TCL_OK)
                 return TCL_ERROR;
+            if (w < 0)
+                return Oradpi_SetError(ip, (OradpiBase*)l, -1, "oralob trim: newSize must be >= 0");
             if (dpiLob_trim(l->lob, (uint64_t)w) != DPI_SUCCESS)
                 return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_trim");
             Tcl_SetObjResult(ip, Tcl_NewIntObj(0));

@@ -24,7 +24,7 @@ int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
 int Oradpi_Cmd_Rollback(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 
 /* ------------------------------------------------------------------------- *
- * Stuff
+ * Implementation
  * ------------------------------------------------------------------------- */
 
 int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
@@ -38,6 +38,9 @@ int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
     OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
+    /* m-6: Guard against half-torn-down connection (e.g., logged off from another interp) */
+    if (!co->conn)
+        return Oradpi_SetError(ip, (OradpiBase*)co, -1, "connection closed");
     if (dpiConn_commit(co->conn) != DPI_SUCCESS)
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)co, "dpiConn_commit");
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
@@ -55,6 +58,9 @@ int Oradpi_Cmd_Rollback(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const 
     OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
+    /* m-6: Guard against half-torn-down connection */
+    if (!co->conn)
+        return Oradpi_SetError(ip, (OradpiBase*)co, -1, "connection closed");
     if (dpiConn_rollback(co->conn) != DPI_SUCCESS)
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)co, "dpiConn_rollback");
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));

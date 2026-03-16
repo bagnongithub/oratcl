@@ -26,18 +26,8 @@
 static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, int doCommit);
 
 /* ------------------------------------------------------------------------- *
- * Stuff
+ * Implementation
  * ------------------------------------------------------------------------- */
-
-extern dpiContext* Oradpi_GlobalDpiContext;
-
-/* SUG-4: Named constants for failover error-class bitmasks and ORA codes */
-#define ORADPI_FO_CLASS_NETWORK 0x01
-#define ORADPI_FO_CLASS_CONNLOST 0x02
-#define ORA_ERR_BROKEN_PIPE 3113
-#define ORA_ERR_NOT_CONNECTED 3114
-#define ORA_ERR_LOST_CONTACT 3135
-#define ORA_ERR_TNS_LOST_CONTACT 12571
 
 /* Check whether an ODPI error matches the configured failover error
  * classes.  Returns 1 if the error is retryable, 0 otherwise. */
@@ -113,7 +103,7 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
 
         /* Capture error immediately (thread-local, must be before next ODPI call) */
         memset(&lastEi, 0, sizeof(lastEi));
-        dpiContext_getError(Oradpi_GlobalDpiContext, &lastEi);
+        (void)Oradpi_CaptureODPIError(&lastEi);
 
         if (attempt + 1 < totalTries && ErrorMatchesFailoverClass(&lastEi, errClasses))
         {
@@ -123,6 +113,9 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
                 sleepMs *= backoffFact;
             if (sleepMs > 60000.0)
                 sleepMs = 60000.0; /* cap at 60s */
+            /* M-7: Clamp to non-negative (NaN or negative backoffFact) */
+            if (!(sleepMs >= 0.0))
+                sleepMs = 0.0;
             Tcl_Sleep((int)sleepMs);
             continue;
         }
@@ -148,6 +141,16 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
     return TCL_OK;
 }
 
+/*
+ * oraexec statement-handle ?-commit?
+ *
+ *   Executes a previously parsed/bound statement. Rebinds stored bind
+ *   variables, supports autocommit and explicit -commit. With failover
+ *   policy configured, retries with exponential backoff on matching errors.
+ *   Returns: 0 on success.
+ *   Errors:  ODPI-C execution errors; invalid/unprepared handle; async busy.
+ *   Thread-safety: safe — per-interp state only.
+ */
 int Oradpi_Cmd_Exec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
     (void)cd;
@@ -165,14 +168,11 @@ int Oradpi_Cmd_Exec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv
     int doCommit = 0;
     if (objc == 3)
     {
-        const char* o = Tcl_GetString(objv[2]);
-        if (strcmp(o, "-commit") == 0)
-            doCommit = 1;
-        else
-        {
-            Tcl_WrongNumArgs(ip, 1, objv, "statement-handle ?-commit?");
+        static const char* const execOpts[] = {"-commit", NULL};
+        int optIdx = 0;
+        if (Tcl_GetIndexFromObj(ip, objv[2], execOpts, "option", 0, &optIdx) != TCL_OK)
             return TCL_ERROR;
-        }
+        doCommit = 1;
     }
 
     const char* skey = Tcl_GetString(objv[1]);
@@ -248,7 +248,7 @@ int Oradpi_Cmd_Plexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
     Tcl_Obj* blockObj = NULL;
     int doCommit = 0;
 
-    int argi = 2;
+    Tcl_Size argi = 2;
     while (argi < objc)
     {
         const char* t = Tcl_GetString(objv[argi]);

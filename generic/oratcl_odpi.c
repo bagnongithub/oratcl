@@ -17,6 +17,9 @@
  */
 
 #include <string.h>
+#ifndef USE_TCL_STUBS
+#define USE_TCL_STUBS
+#endif
 #include <tcl.h>
 
 #include "cmd_int.h"
@@ -34,7 +37,7 @@ DLLEXPORT int oratcl_Init(Tcl_Interp* ip);
 DLLEXPORT int oratcl_SafeInit(Tcl_Interp* ip);
 
 /* ------------------------------------------------------------------------- *
- * Stuff
+ * Process-global Tcl/ODPI state
  * ------------------------------------------------------------------------- */
 
 dpiContext* Oradpi_GlobalDpiContext = NULL;
@@ -53,6 +56,25 @@ static void Oradpi_ProcessExit(void* unused)
         Oradpi_GlobalDpiContext = NULL;
     }
     Tcl_MutexUnlock(&gCtxMutex);
+}
+
+dpiContext* Oradpi_GetDpiContext(void)
+{
+    dpiContext* ctx = NULL;
+    Tcl_MutexLock(&gCtxMutex);
+    ctx = Oradpi_GlobalDpiContext;
+    Tcl_MutexUnlock(&gCtxMutex);
+    return ctx;
+}
+
+int Oradpi_CaptureODPIError(dpiErrorInfo* ei)
+{
+    dpiContext* ctx = Oradpi_GetDpiContext();
+    if (!ctx || !ei)
+        return 0;
+    memset(ei, 0, sizeof(*ei));
+    dpiContext_getError(ctx, ei);
+    return 1;
 }
 
 int Oradpi_DpiContextEnsure(Tcl_Interp* ip)
@@ -83,34 +105,60 @@ int Oradpi_DpiContextEnsure(Tcl_Interp* ip)
     return TCL_OK;
 }
 
+/* m-1: Bare-name registration (e.g., "oralogon" in ::) is preserved for backward
+ * compatibility with existing oratcl scripts.  New code should use the
+ * namespaced form (::oratcl::oralogon) via [namespace import ::oratcl::*]. */
+static void RegisterCommand(Tcl_Interp* ip, Tcl_Namespace* nsPtr, const char* name, Tcl_ObjCmdProc2* proc)
+{
+    Tcl_CreateObjCommand2(ip, name, proc, NULL, NULL);
+    if (nsPtr)
+    {
+        Tcl_DString ds;
+        Tcl_DStringInit(&ds);
+        Tcl_DStringAppend(&ds, ORATCL_NAMESPACE, -1);
+        Tcl_DStringAppend(&ds, "::", 2);
+        Tcl_DStringAppend(&ds, name, -1);
+        Tcl_CreateObjCommand2(ip, Tcl_DStringValue(&ds), proc, NULL, NULL);
+        Tcl_DStringFree(&ds);
+    }
+}
+
 static void RegisterCommands(Tcl_Interp* ip)
 {
-    Tcl_CreateObjCommand2(ip, "oralogon", Oradpi_Cmd_Logon, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oralogoff", Oradpi_Cmd_Logoff, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraconfig", Oradpi_Cmd_Config, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orainfo", Oradpi_Cmd_Info, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraopen", Oradpi_Cmd_Open, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraclose", Oradpi_Cmd_Close, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orastmt", Oradpi_Cmd_Stmt, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraparse", Oradpi_Cmd_Parse, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orasql", Oradpi_Cmd_StmtSql, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orabind", Oradpi_Cmd_Orabind, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orabindexec", Oradpi_Cmd_Orabindexec, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraexec", Oradpi_Cmd_Exec, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraplexec", Oradpi_Cmd_Plexec, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orafetch", Oradpi_Cmd_Fetch, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oracols", Oradpi_Cmd_Cols, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oradesc", Oradpi_Cmd_Desc, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oramsg", Oradpi_Cmd_Msg, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oralob", Oradpi_Cmd_Lob, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraautocommit", Oradpi_Cmd_Autocommit, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraautocom", Oradpi_Cmd_Autocommit, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oracommit", Oradpi_Cmd_Commit, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraroll", Oradpi_Cmd_Rollback, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orarollback", Oradpi_Cmd_Rollback, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orabreak", Oradpi_Cmd_Break, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "oraexecasync", Oradpi_Cmd_ExecAsync, NULL, NULL);
-    Tcl_CreateObjCommand2(ip, "orawaitasync", Oradpi_Cmd_WaitAsync, NULL, NULL);
+    Tcl_Namespace* nsPtr = Tcl_FindNamespace(ip, ORATCL_NAMESPACE, NULL, 0);
+    if (!nsPtr)
+        nsPtr = Tcl_CreateNamespace(ip, ORATCL_NAMESPACE, NULL, NULL);
+
+    RegisterCommand(ip, nsPtr, "oralogon", Oradpi_Cmd_Logon);
+    RegisterCommand(ip, nsPtr, "oralogoff", Oradpi_Cmd_Logoff);
+    RegisterCommand(ip, nsPtr, "oraconfig", Oradpi_Cmd_Config);
+    RegisterCommand(ip, nsPtr, "orainfo", Oradpi_Cmd_Info);
+    RegisterCommand(ip, nsPtr, "oraopen", Oradpi_Cmd_Open);
+    RegisterCommand(ip, nsPtr, "oraclose", Oradpi_Cmd_Close);
+    RegisterCommand(ip, nsPtr, "orastmt", Oradpi_Cmd_Stmt);
+    RegisterCommand(ip, nsPtr, "oraparse", Oradpi_Cmd_Parse);
+    RegisterCommand(ip, nsPtr, "orasql", Oradpi_Cmd_StmtSql);
+    RegisterCommand(ip, nsPtr, "orabind", Oradpi_Cmd_Orabind);
+    RegisterCommand(ip, nsPtr, "orabindexec", Oradpi_Cmd_Orabindexec);
+    RegisterCommand(ip, nsPtr, "oraexec", Oradpi_Cmd_Exec);
+    RegisterCommand(ip, nsPtr, "oraplexec", Oradpi_Cmd_Plexec);
+    RegisterCommand(ip, nsPtr, "orafetch", Oradpi_Cmd_Fetch);
+    RegisterCommand(ip, nsPtr, "oracols", Oradpi_Cmd_Cols);
+    RegisterCommand(ip, nsPtr, "oradesc", Oradpi_Cmd_Desc);
+    RegisterCommand(ip, nsPtr, "oramsg", Oradpi_Cmd_Msg);
+    RegisterCommand(ip, nsPtr, "oralob", Oradpi_Cmd_Lob);
+    RegisterCommand(ip, nsPtr, "oraautocommit", Oradpi_Cmd_Autocommit);
+    RegisterCommand(ip, nsPtr, "oraautocom", Oradpi_Cmd_Autocommit);
+    RegisterCommand(ip, nsPtr, "oracommit", Oradpi_Cmd_Commit);
+    RegisterCommand(ip, nsPtr, "oraroll", Oradpi_Cmd_Rollback);
+    RegisterCommand(ip, nsPtr, "orarollback", Oradpi_Cmd_Rollback);
+    RegisterCommand(ip, nsPtr, "orabreak", Oradpi_Cmd_Break);
+    RegisterCommand(ip, nsPtr, "oraexecasync", Oradpi_Cmd_ExecAsync);
+    RegisterCommand(ip, nsPtr, "orawaitasync", Oradpi_Cmd_WaitAsync);
+
+    /* Export all commands so users can [namespace import ::oratcl::*] */
+    if (nsPtr)
+        Tcl_Export(ip, nsPtr, "ora*", 0);
 }
 
 #define ORATCL_INTERP_MARK "oradpi.loaded"
@@ -126,9 +174,16 @@ static void Oratcl_InterpDeleteProc(void* clientData, Tcl_Interp* ip)
      * commands when the package is loaded more than once in the same interp. */
 }
 
+/* S-5: Centralized version strings.
+ * ORATCL_VERSION: the oratcl package version — must match configure.ac,
+ * pkgIndex.tcl, and the Makefile's PACKAGE_VERSION.
+ * ORATCL_TCL_MIN: minimum Tcl version required by this extension. */
+#define ORATCL_VERSION "9.0"
+#define ORATCL_TCL_MIN "9.0"
+
 DLLEXPORT int oratcl_Init(Tcl_Interp* ip)
 {
-    if (Tcl_InitStubs(ip, "9.0-", 0) == NULL)
+    if (Tcl_InitStubs(ip, ORATCL_TCL_MIN, 0) == NULL)
         return TCL_ERROR;
     if (Oradpi_DpiContextEnsure(ip) != TCL_OK)
         return TCL_ERROR;
@@ -138,11 +193,13 @@ DLLEXPORT int oratcl_Init(Tcl_Interp* ip)
         RegisterCommands(ip);
         Tcl_SetAssocData(ip, ORATCL_INTERP_MARK, Oratcl_InterpDeleteProc, (void*)1);
     }
-    return Tcl_PkgProvide(ip, "oratcl", "9.0");
+    return Tcl_PkgProvide(ip, "oratcl", ORATCL_VERSION);
 }
 
 DLLEXPORT int oratcl_SafeInit(Tcl_Interp* ip)
 {
+    if (Tcl_InitStubs(ip, ORATCL_TCL_MIN, 0) == NULL)
+        return TCL_ERROR;
     Tcl_SetObjResult(ip, Tcl_NewStringObj("oratcl: cannot load into a safe interpreter (database access not permitted)", -1));
     return TCL_ERROR;
 }

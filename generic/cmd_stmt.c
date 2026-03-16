@@ -19,12 +19,6 @@
 #include "cmd_int.h"
 #include "dpi.h"
 
-/* Failover error-class bitmask constants (must match cmd_exec.c) */
-#define ORADPI_FO_CLASS_NETWORK 0x01
-#define ORADPI_FO_CLASS_CONNLOST 0x02
-
-extern dpiContext* Oradpi_GlobalDpiContext;
-
 #ifndef DPI_DEFAULT_FETCH_ARRAY_SIZE
 #define DPI_DEFAULT_FETCH_ARRAY_SIZE 100
 #endif
@@ -92,6 +86,16 @@ static int GetOptIndex(Tcl_Interp* ip, Tcl_Obj* nameObj, const char* const* tabl
     return Tcl_GetIndexFromObj(ip, nameObj, table, msg, 0, idxOut);
 }
 
+static int SetStmtAndOwnerODPIError(Tcl_Interp* ip, OradpiStmt* s, const char* where)
+{
+    dpiErrorInfo ei;
+    if (!Oradpi_CaptureODPIError(&ei))
+        return Oradpi_SetError(ip, (OradpiBase*)s, -1, where ? where : "ODPI error");
+    if (s && s->owner)
+        Oradpi_SetErrorFromODPIInfo(NULL, (OradpiBase*)s->owner, where, &ei);
+    return Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s, where, &ei);
+}
+
 /* ---- Statement config option table ---- */
 static const char* const stmtOptNames[] = {"fetchrows", "prefetchrows", NULL};
 enum StmtOptIdx
@@ -131,29 +135,29 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
         if (co->conn && dpiConn_getStmtCacheSize(co->conn, &v) == DPI_SUCCESS)
             co->stmtCacheSize = v;
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("stmtcachesize", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)co->stmtCacheSize));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->stmtCacheSize));
 
         uint32_t fas = co->fetchArraySize ? co->fetchArraySize : DPI_DEFAULT_FETCH_ARRAY_SIZE;
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("fetcharraysize", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)fas));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(fas));
 
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("prefetchrows", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)co->prefetchRows));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->prefetchRows));
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("prefetchmemory", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)co->prefetchMemory));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->prefetchMemory));
 
         if (co->conn && dpiConn_getCallTimeout(co->conn, &v) == DPI_SUCCESS)
             co->callTimeout = v;
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("calltimeout", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)co->callTimeout));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->callTimeout));
 
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("inlineLobs", -1));
         Tcl_ListObjAppendElement(ip, res, Tcl_NewBooleanObj(co->inlineLobs ? 1 : 0));
 
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foMaxAttempts", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)co->foMaxAttempts));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->foMaxAttempts));
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foBackoffMs", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)co->foBackoffMs));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->foBackoffMs));
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foBackoffFactor", -1));
         Tcl_ListObjAppendElement(ip, res, Tcl_NewDoubleObj(co->foBackoffFactor));
 
@@ -166,7 +170,7 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
         Tcl_ListObjAppendElement(ip, res, classes);
 
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foDebounceMs", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)co->foDebounceMs));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->foDebounceMs));
 
         Tcl_SetObjResult(ip, res);
         return TCL_OK;
@@ -185,37 +189,37 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
                 uint32_t v = co->stmtCacheSize;
                 if (co->conn && dpiConn_getStmtCacheSize(co->conn, &v) == DPI_SUCCESS)
                     co->stmtCacheSize = v;
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)co->stmtCacheSize));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->stmtCacheSize));
                 return TCL_OK;
             }
             case COPT_FETCHARRAY:
             {
                 uint32_t fas = co->fetchArraySize ? co->fetchArraySize : DPI_DEFAULT_FETCH_ARRAY_SIZE;
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)fas));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(fas));
                 return TCL_OK;
             }
             case COPT_PREFETCHROWS:
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)co->prefetchRows));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->prefetchRows));
                 return TCL_OK;
             case COPT_PREFETCHMEM:
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)co->prefetchMemory));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->prefetchMemory));
                 return TCL_OK;
             case COPT_CALLTIMEOUT:
             {
                 uint32_t v = co->callTimeout;
                 if (co->conn && dpiConn_getCallTimeout(co->conn, &v) == DPI_SUCCESS)
                     co->callTimeout = v;
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)co->callTimeout));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->callTimeout));
                 return TCL_OK;
             }
             case COPT_INLINELOBS:
                 Tcl_SetObjResult(ip, Tcl_NewBooleanObj(co->inlineLobs ? 1 : 0));
                 return TCL_OK;
             case COPT_FOMAXATT:
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)co->foMaxAttempts));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->foMaxAttempts));
                 return TCL_OK;
             case COPT_FOBACKOFF:
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)co->foBackoffMs));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->foBackoffMs));
                 return TCL_OK;
             case COPT_FOFACTOR:
                 Tcl_SetObjResult(ip, Tcl_NewDoubleObj(co->foBackoffFactor));
@@ -231,7 +235,7 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
                 return TCL_OK;
             }
             case COPT_FODEBOUNCE:
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)co->foDebounceMs));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->foDebounceMs));
                 return TCL_OK;
         }
         /* unreachable */
@@ -369,12 +373,12 @@ static int Oradpi_ConfigStmt(Tcl_Interp* ip, OradpiStmt* s, Tcl_Size objc, Tcl_O
     {
         Tcl_Obj* res = Tcl_NewListObj(0, NULL);
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("fetchrows", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)s->fetchArray));
-        uint32_t pr = s->owner ? s->owner->prefetchRows : 0;
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(s->fetchArray));
+        uint32_t pr = s->prefetchRows ? s->prefetchRows : (s->owner ? s->owner->prefetchRows : 0);
         if (s->stmt)
             (void)dpiStmt_getPrefetchRows(s->stmt, &pr);
         Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("prefetchrows", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)pr));
+        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(pr));
         Tcl_SetObjResult(ip, res);
         return TCL_OK;
     }
@@ -387,14 +391,14 @@ static int Oradpi_ConfigStmt(Tcl_Interp* ip, OradpiStmt* s, Tcl_Size objc, Tcl_O
         switch ((enum StmtOptIdx)idx)
         {
             case SOPT_FETCHROWS:
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)s->fetchArray));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(s->fetchArray));
                 return TCL_OK;
             case SOPT_PREFETCHROWS:
             {
-                uint32_t pr = s->owner ? s->owner->prefetchRows : 0;
+                uint32_t pr = s->prefetchRows ? s->prefetchRows : (s->owner ? s->owner->prefetchRows : 0);
                 if (s->stmt)
                     (void)dpiStmt_getPrefetchRows(s->stmt, &pr);
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)pr));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(pr));
                 return TCL_OK;
             }
         }
@@ -420,7 +424,7 @@ static int Oradpi_ConfigStmt(Tcl_Interp* ip, OradpiStmt* s, Tcl_Size objc, Tcl_O
                     if (dpiStmt_setFetchArraySize(s->stmt, s->fetchArray) != DPI_SUCCESS)
                         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_setFetchArraySize");
                 }
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)s->fetchArray));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(s->fetchArray));
                 return TCL_OK;
             }
             case SOPT_PREFETCHROWS:
@@ -429,13 +433,14 @@ static int Oradpi_ConfigStmt(Tcl_Interp* ip, OradpiStmt* s, Tcl_Size objc, Tcl_O
                 if (Tcl_GetWideIntFromObj(ip, objv[3], &v) != TCL_OK)
                     return TCL_ERROR;
                 uint32_t pr = (uint32_t)(v >= 0 && (uint64_t)v <= UINT32_MAX ? v : 0);
+                s->prefetchRows = pr;
                 if (s->stmt)
                 {
                     if (dpiStmt_setPrefetchRows(s->stmt, pr) != DPI_SUCCESS)
                         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_setPrefetchRows");
                 }
                 /* Note: only affects this statement, not the connection default */
-                Tcl_SetObjResult(ip, Tcl_NewIntObj((int)pr));
+                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(pr));
                 return TCL_OK;
             }
         }
@@ -518,14 +523,7 @@ int Oradpi_Cmd_Parse(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     if (sqlLen < 0 || (uint64_t)sqlLen > UINT32_MAX)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "SQL text exceeds maximum length");
     if (dpiConn_prepareStmt(s->owner->conn, 0, sql, (uint32_t)sqlLen, NULL, 0, &s->stmt) != DPI_SUCCESS)
-    {
-        dpiErrorInfo ei;
-        dpiContext_getError(Oradpi_GlobalDpiContext, &ei);
-        Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s, "dpiConn_prepareStmt", &ei);
-        if (s->owner)
-            Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s->owner, "dpiConn_prepareStmt", &ei);
-        return TCL_ERROR;
-    }
+        return SetStmtAndOwnerODPIError(ip, s, "dpiConn_prepareStmt");
     s->executedInParse = 0;
 
     if (s->fetchArray)
@@ -533,47 +531,29 @@ int Oradpi_Cmd_Parse(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         if (dpiStmt_setFetchArraySize(s->stmt, s->fetchArray) != DPI_SUCCESS)
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_setFetchArraySize");
     }
-    if (s->owner && s->owner->prefetchRows)
     {
-        if (dpiStmt_setPrefetchRows(s->stmt, s->owner->prefetchRows) != DPI_SUCCESS)
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_setPrefetchRows");
+        uint32_t pr = s->prefetchRows ? s->prefetchRows : (s->owner ? s->owner->prefetchRows : 0);
+        if (pr)
+        {
+            if (dpiStmt_setPrefetchRows(s->stmt, pr) != DPI_SUCCESS)
+                return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_setPrefetchRows");
+        }
     }
     Oradpi_UpdateStmtType(s);
 
     dpiStmtInfo info;
     if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS)
-    {
-        dpiErrorInfo ei;
-        dpiContext_getError(Oradpi_GlobalDpiContext, &ei);
-        Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s, "dpiStmt_getInfo", &ei);
-        if (s->owner)
-            Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s->owner, "dpiStmt_getInfo", &ei);
-        return TCL_ERROR;
-    }
+        return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_getInfo");
     if (info.isQuery)
     {
         uint32_t bindCount = 0;
         if (dpiStmt_getBindCount(s->stmt, &bindCount) != DPI_SUCCESS)
-        {
-            dpiErrorInfo ei;
-            dpiContext_getError(Oradpi_GlobalDpiContext, &ei);
-            Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s, "dpiStmt_getBindCount", &ei);
-            if (s->owner)
-                Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s->owner, "dpiStmt_getBindCount", &ei);
-            return TCL_ERROR;
-        }
+            return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_getBindCount");
         if (bindCount == 0)
         {
             uint32_t numQueryCols = 0;
             if (dpiStmt_execute(s->stmt, DPI_MODE_EXEC_DEFAULT, &numQueryCols) != DPI_SUCCESS)
-            {
-                dpiErrorInfo ei;
-                dpiContext_getError(Oradpi_GlobalDpiContext, &ei);
-                Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s, "dpiStmt_execute", &ei);
-                if (s->owner)
-                    Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s->owner, "dpiStmt_execute", &ei);
-                return TCL_ERROR;
-            }
+                return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_execute");
             s->executedInParse = 1;
         }
     }

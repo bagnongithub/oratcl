@@ -38,11 +38,12 @@ static void Oradpi_ParseConnect(const char* cs,
                                 int* extAuth);
 
 /* ------------------------------------------------------------------------- *
- * Stuff
+ * Implementation
  * ------------------------------------------------------------------------- */
 
-extern dpiContext* Oradpi_GlobalDpiContext;
-
+/* m-2: Parse connect string with support for double-quoted passwords.
+ * Format: user/"pass@word"@db  or  user/password@db  or  /  (ext auth)
+ * Passwords containing @ or / must be double-quoted. */
 static void Oradpi_ParseConnect(const char* cs,
                                 const char** user,
                                 uint32_t* ulen,
@@ -57,11 +58,13 @@ static void Oradpi_ParseConnect(const char* cs,
     *extAuth = 0;
     if (!cs)
         return;
-    const char* at = strchr(cs, '@');
     const char* slash = strchr(cs, '/');
+
+    /* External auth: starts with / */
     if (cs[0] == '/' && (!slash || slash == cs))
     {
         *extAuth = 1;
+        const char* at = strchr(cs, '@');
         if (at && at[1])
         {
             *db = at + 1;
@@ -69,6 +72,36 @@ static void Oradpi_ParseConnect(const char* cs,
         }
         return;
     }
+
+    /* Look for quoted password: user/"..."@db */
+    if (slash && slash[1] == '"')
+    {
+        *user = cs;
+        *ulen = (uint32_t)(slash - cs);
+        const char* pwStart = slash + 2; /* skip /" */
+        const char* closeQuote = strchr(pwStart, '"');
+        if (closeQuote)
+        {
+            *pw = pwStart;
+            *plen = (uint32_t)(closeQuote - pwStart);
+            /* After closing quote, expect @ or end of string */
+            if (closeQuote[1] == '@' && closeQuote[2])
+            {
+                *db = closeQuote + 2;
+                *dblen = (uint32_t)strlen(*db);
+            }
+        }
+        else
+        {
+            /* No closing quote — treat entire remainder as password */
+            *pw = pwStart;
+            *plen = (uint32_t)strlen(pwStart);
+        }
+        return;
+    }
+
+    /* Unquoted: original logic using first @ and first / */
+    const char* at = strchr(cs, '@');
     if (at)
     {
         if (slash && slash < at)
@@ -103,6 +136,16 @@ static void Oradpi_ParseConnect(const char* cs,
     }
 }
 
+/*
+ * oralogon connect-str ?-pool {min max incr}? ?-homogeneous bool?
+ *         ?-getmode wait|nowait|forceget|timedwait? ?-failovercallback proc?
+ *
+ *   Opens a dedicated or pooled Oracle connection. connect-str may be
+ *   user/password@db, user/"quoted@pass"@db, or / (external auth).
+ *   Returns: connection handle name (e.g., "oraL1") on success.
+ *   Errors:  ODPI-C connect/pool errors; invalid option values.
+ *   Thread-safety: safe — allocates per-interp state only.
+ */
 int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
     (void)cd;
@@ -135,7 +178,7 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     static const int getmodeValues[] = {
         DPI_MODE_POOL_GET_WAIT, DPI_MODE_POOL_GET_NOWAIT, DPI_MODE_POOL_GET_FORCEGET, DPI_MODE_POOL_GET_TIMEDWAIT};
 
-    for (int i = 2; i < objc; i++)
+    for (Tcl_Size i = 2; i < objc; i++)
     {
         int optIdx;
         if (Tcl_GetIndexFromObj(ip, objv[i], logonOpts, "option", 0, &optIdx) != TCL_OK)
@@ -202,10 +245,14 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     int ext = 0;
     Oradpi_ParseConnect(connstr, &user, &ulen, &pw, &plen, &db, &dblen, &ext);
 
+    dpiContext* ctx = Oradpi_GetDpiContext();
+    if (!ctx)
+        return Oradpi_SetError(ip, NULL, -1, "ODPI context is not initialized");
+
     dpiCommonCreateParams cparams;
     dpiConnCreateParams ccp;
-    dpiContext_initCommonCreateParams(Oradpi_GlobalDpiContext, &cparams);
-    dpiContext_initConnCreateParams(Oradpi_GlobalDpiContext, &ccp);
+    dpiContext_initCommonCreateParams(ctx, &cparams);
+    dpiContext_initConnCreateParams(ctx, &ccp);
     ccp.externalAuth = ext;
     /* Always enable threaded mode so OCI protects internal structures when
      * async worker threads operate on connections from this context. */
@@ -221,13 +268,13 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
             return Oradpi_SetError(ip, NULL, -1, "-pool: min must be <= max");
 
         dpiPoolCreateParams pp;
-        dpiContext_initPoolCreateParams(Oradpi_GlobalDpiContext, &pp);
+        dpiContext_initPoolCreateParams(ctx, &pp);
         pp.minSessions = (uint32_t)minS;
         pp.maxSessions = (uint32_t)maxS;
         pp.sessionIncrement = (uint32_t)incS;
         pp.homogeneous = homogeneous;
         pp.externalAuth = ext;
-        if (dpiPool_create(Oradpi_GlobalDpiContext, user, ulen, pw, plen, db, dblen, &cparams, &pp, &pool) != DPI_SUCCESS)
+        if (dpiPool_create(ctx, user, ulen, pw, plen, db, dblen, &cparams, &pp, &pool) != DPI_SUCCESS)
             return Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_create");
         if (dpiPool_setGetMode(pool, (dpiPoolGetMode)getmode) != DPI_SUCCESS)
         {
@@ -244,7 +291,7 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     }
     else
     {
-        if (dpiConn_create(Oradpi_GlobalDpiContext, user, ulen, pw, plen, db, dblen, &cparams, &ccp, &conn) != DPI_SUCCESS)
+        if (dpiConn_create(ctx, user, ulen, pw, plen, db, dblen, &cparams, &ccp, &conn) != DPI_SUCCESS)
             return Oradpi_SetErrorFromODPI(ip, NULL, "dpiConn_create");
     }
 
@@ -281,6 +328,14 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     return TCL_OK;
 }
 
+/*
+ * oralogoff logon-handle
+ *
+ *   Closes the connection and releases all associated statements.
+ *   Returns: 0 on success.
+ *   Errors:  invalid handle.
+ *   Thread-safety: safe — cancels async ops, modifies per-interp state only.
+ */
 int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
     (void)cd;
@@ -299,11 +354,16 @@ int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
     /* Cancel all pending async operations on this connection first */
     Oradpi_CancelAndJoinAllForConn(ip, co);
 
-    /* Invalidate all statements that reference this connection (fix 3.2).
-     * This prevents use-after-free if scripts use stmt handles after logoff. */
+    /* M-5 fix: Collect and fully remove all statements owned by this connection.
+     * The old code manually closed stmt handles but left the OradpiStmt structs
+     * in the stmts hash table, causing double cleanup during interp teardown.
+     * We collect pointers first since Oradpi_RemoveStmt modifies the hash. */
     OradpiInterpState* st = (OradpiInterpState*)Tcl_GetAssocData(ip, "oradpi", NULL);
     if (st)
     {
+        Tcl_Size stmtCap = 8, stmtCount = 0;
+        OradpiStmt** stmtsToFree = (OradpiStmt**)Tcl_Alloc(sizeof(OradpiStmt*) * (size_t)stmtCap);
+
         Tcl_HashSearch sSearch;
         Tcl_HashEntry* sEntry;
         for (sEntry = Tcl_FirstHashEntry(&st->stmts, &sSearch); sEntry; sEntry = Tcl_NextHashEntry(&sSearch))
@@ -311,22 +371,17 @@ int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
             OradpiStmt* s = (OradpiStmt*)Tcl_GetHashValue(sEntry);
             if (s && s->owner == co)
             {
-                /* Clean up bind stores and pending refs for this statement */
-                if (s->base.name)
+                if (stmtCount == stmtCap)
                 {
-                    const char* skey = Tcl_GetString(s->base.name);
-                    Oradpi_BindStoreForget(ip, skey);
-                    Oradpi_PendingsForget(ip, skey);
+                    stmtCap *= 2;
+                    stmtsToFree = (OradpiStmt**)Tcl_Realloc((char*)stmtsToFree, sizeof(OradpiStmt*) * (size_t)stmtCap);
                 }
-                if (s->stmt)
-                {
-                    dpiStmt_close(s->stmt, NULL, 0);
-                    dpiStmt_release(s->stmt);
-                    s->stmt = NULL;
-                }
-                s->owner = NULL;
+                stmtsToFree[stmtCount++] = s;
             }
         }
+        for (Tcl_Size i = 0; i < stmtCount; i++)
+            Oradpi_RemoveStmt(ip, stmtsToFree[i]);
+        Tcl_Free((char*)stmtsToFree);
 
         if (co->base.name)
         {

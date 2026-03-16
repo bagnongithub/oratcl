@@ -44,7 +44,7 @@ OradpiStmt* Oradpi_NewStmt(Tcl_Interp* ip, OradpiConn* co);
 static void Oradpi_RegisterConnInInterp(OradpiInterpState* st, OradpiConn* co);
 
 /* ------------------------------------------------------------------------- *
- * Stuff
+ * Process-global and per-interpreter state
  * ------------------------------------------------------------------------- */
 
 typedef struct GlobalConnRec
@@ -59,6 +59,28 @@ static Tcl_Mutex gConnMapMutex;
 static int gConnMapInited = 0;
 static Tcl_HashTable gConnByName;
 
+/* M-3: Cleanup handler for process exit — frees all GlobalConnRec entries
+ * and destroys the hash table to prevent leaks. */
+static void GlobalConnMap_ExitHandler(void* unused)
+{
+    (void)unused;
+    Tcl_MutexLock(&gConnMapMutex);
+    if (gConnMapInited)
+    {
+        Tcl_HashSearch search;
+        Tcl_HashEntry* he;
+        for (he = Tcl_FirstHashEntry(&gConnByName, &search); he; he = Tcl_NextHashEntry(&search))
+        {
+            GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
+            if (gr)
+                Tcl_Free((char*)gr);
+        }
+        Tcl_DeleteHashTable(&gConnByName);
+        gConnMapInited = 0;
+    }
+    Tcl_MutexUnlock(&gConnMapMutex);
+}
+
 static void GlobalConnMap_Init(void)
 {
     Tcl_MutexLock(&gConnMapMutex);
@@ -66,6 +88,7 @@ static void GlobalConnMap_Init(void)
     {
         Tcl_InitHashTable(&gConnByName, TCL_STRING_KEYS);
         gConnMapInited = 1;
+        Tcl_CreateExitHandler(GlobalConnMap_ExitHandler, NULL);
     }
     Tcl_MutexUnlock(&gConnMapMutex);
 }
@@ -134,6 +157,11 @@ static void GlobalConn_MarkOwnerGone(const char* name)
     {
         GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
         gr->ownerAlive = 0;
+        /* M-6: Null out the conn pointer so GlobalConn_Lookup cannot
+         * hand out a reference to a connection being freed by the owner.
+         * Without this, there's a race window between MarkOwnerGone and
+         * Erase where Lookup could see ownerAlive==0 but conn!=NULL. */
+        gr->conn = NULL;
     }
     Tcl_MutexUnlock(&gConnMapMutex);
 }
@@ -262,7 +290,12 @@ void Oradpi_FreeStmt(Tcl_Interp* ip, OradpiStmt* s)
         return;
     if (s->stmt)
     {
-        (void)Oradpi_StmtWaitForAsync(s, 1 /*cancel*/, -1 /*wait indefinitely*/);
+        /* M-4: Use a finite timeout (30s) instead of blocking indefinitely.
+         * If the Oracle server is unreachable, dpiConn_breakExecution may
+         * not unblock the worker thread, causing interp teardown to hang.
+         * On timeout, we proceed with cleanup; the worker's own addRef'd
+         * handles will be released when it eventually returns. */
+        (void)Oradpi_StmtWaitForAsync(s, 1 /*cancel*/, 30000 /*30s timeout*/);
         dpiStmt_close(s->stmt, NULL, 0);
         dpiStmt_release(s->stmt);
         s->stmt = NULL;
@@ -400,9 +433,13 @@ OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool)
         memset(&enc, 0, sizeof enc);
         if (dpiConn_getEncodingInfo(co->conn, &enc) == DPI_SUCCESS && enc.encoding)
         {
-            size_t elen = strlen(enc.encoding);
-            co->cachedEncoding = (char*)Tcl_Alloc(elen + 1);
-            memcpy(co->cachedEncoding, enc.encoding, elen + 1);
+            Tcl_Size elen = (Tcl_Size)strlen(enc.encoding);
+            size_t encBytes = 0;
+            if (Oradpi_CheckedAllocBytes(NULL, elen + 1, sizeof(char), &encBytes, "connection encoding cache") == TCL_OK)
+            {
+                co->cachedEncoding = (char*)Tcl_Alloc(encBytes);
+                memcpy(co->cachedEncoding, enc.encoding, encBytes);
+            }
         }
     }
     Oradpi_RegisterConnInInterp(st, co);
@@ -430,6 +467,21 @@ static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, dpiC
     co->stmtCacheSize = 0;
     co->ownerClose = 0;
     co->cachedEncoding = NULL;
+    if (co->conn)
+    {
+        dpiEncodingInfo enc;
+        memset(&enc, 0, sizeof enc);
+        if (dpiConn_getEncodingInfo(co->conn, &enc) == DPI_SUCCESS && enc.encoding)
+        {
+            Tcl_Size elen = (Tcl_Size)strlen(enc.encoding);
+            size_t encBytes = 0;
+            if (Oradpi_CheckedAllocBytes(NULL, elen + 1, sizeof(char), &encBytes, "adopted connection encoding cache") == TCL_OK)
+            {
+                co->cachedEncoding = (char*)Tcl_Alloc(encBytes);
+                memcpy(co->cachedEncoding, enc.encoding, encBytes);
+            }
+        }
+    }
 
     int newEntry;
     Tcl_HashEntry* e = Tcl_CreateHashEntry(&st->conns, handleName, &newEntry);

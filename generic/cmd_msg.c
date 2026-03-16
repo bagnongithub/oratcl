@@ -76,6 +76,16 @@ enum MsgOptionIdx
     MSG_ALLX
 };
 
+/*
+ * oramsg handle option
+ *
+ *   Queries the per-handle message area for the last operation's status.
+ *   Options: rc, error, rows, peo, ocicode, sqltype, fn, action, sqlstate,
+ *   recoverable, warning, offset, all, allx.
+ *   Returns: the requested value or a key-value list (all/allx).
+ *   Errors:  invalid handle; unknown option.
+ *   Thread-safety: safe — read-only access to per-interp handle state.
+ */
 int Oradpi_Cmd_Msg(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
     (void)cd;
@@ -98,13 +108,13 @@ int Oradpi_Cmd_Msg(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             Tcl_SetObjResult(ip, Tcl_NewIntObj(b->msg.rc));
             return TCL_OK;
         case MSG_ERROR:
-            Tcl_SetObjResult(ip, b->msg.error ? b->msg.error : Tcl_NewObj());
+            Tcl_SetObjResult(ip, b->msg.error ? Oradpi_SnapshotObj(b->msg.error) : Tcl_NewObj());
             return TCL_OK;
         case MSG_ROWS:
             Tcl_SetObjResult(ip, Tcl_NewWideIntObj((Tcl_WideInt)b->msg.rows));
             return TCL_OK;
         case MSG_PEO:
-            Tcl_SetObjResult(ip, Tcl_NewIntObj((int)b->msg.peo));
+            Tcl_SetObjResult(ip, Tcl_NewWideIntObj((Tcl_WideInt)(uint64_t)b->msg.peo));
             return TCL_OK;
         case MSG_OCICODE:
             Tcl_SetObjResult(ip, Tcl_NewIntObj((int)b->msg.ocicode));
@@ -113,13 +123,13 @@ int Oradpi_Cmd_Msg(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             Tcl_SetObjResult(ip, Tcl_NewIntObj((int)b->msg.sqltype));
             return TCL_OK;
         case MSG_FN:
-            Tcl_SetObjResult(ip, b->msg.fn ? b->msg.fn : Tcl_NewObj());
+            Tcl_SetObjResult(ip, b->msg.fn ? Oradpi_SnapshotObj(b->msg.fn) : Tcl_NewObj());
             return TCL_OK;
         case MSG_ACTION:
-            Tcl_SetObjResult(ip, b->msg.action ? b->msg.action : Tcl_NewObj());
+            Tcl_SetObjResult(ip, b->msg.action ? Oradpi_SnapshotObj(b->msg.action) : Tcl_NewObj());
             return TCL_OK;
         case MSG_SQLSTATE:
-            Tcl_SetObjResult(ip, b->msg.sqlstate ? b->msg.sqlstate : Tcl_NewObj());
+            Tcl_SetObjResult(ip, b->msg.sqlstate ? Oradpi_SnapshotObj(b->msg.sqlstate) : Tcl_NewObj());
             return TCL_OK;
         case MSG_RECOVERABLE:
             Tcl_SetObjResult(ip, Tcl_NewBooleanObj(b->msg.recoverable));
@@ -128,7 +138,7 @@ int Oradpi_Cmd_Msg(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             Tcl_SetObjResult(ip, Tcl_NewBooleanObj(b->msg.warning));
             return TCL_OK;
         case MSG_OFFSET:
-            Tcl_SetObjResult(ip, Tcl_NewIntObj((int)b->msg.offset));
+            Tcl_SetObjResult(ip, Tcl_NewWideIntObj((Tcl_WideInt)(uint64_t)b->msg.offset));
             return TCL_OK;
         case MSG_ALL:
         case MSG_ALLX:
@@ -137,11 +147,11 @@ int Oradpi_Cmd_Msg(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("rc", -1));
             Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj(b->msg.rc));
             Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("error", -1));
-            Tcl_ListObjAppendElement(ip, res, b->msg.error ? b->msg.error : Tcl_NewObj());
+            Tcl_ListObjAppendElement(ip, res, b->msg.error ? Oradpi_SnapshotObj(b->msg.error) : Tcl_NewObj());
             Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("rows", -1));
             Tcl_ListObjAppendElement(ip, res, Tcl_NewWideIntObj((Tcl_WideInt)b->msg.rows));
             Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("peo", -1));
-            Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)b->msg.peo));
+            Tcl_ListObjAppendElement(ip, res, Tcl_NewWideIntObj((Tcl_WideInt)(uint64_t)b->msg.peo));
             Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("ocicode", -1));
             Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)b->msg.ocicode));
             Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("sqltype", -1));
@@ -149,17 +159,17 @@ int Oradpi_Cmd_Msg(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             if (idx == MSG_ALLX)
             {
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("fn", -1));
-                Tcl_ListObjAppendElement(ip, res, b->msg.fn ? b->msg.fn : Tcl_NewObj());
+                Tcl_ListObjAppendElement(ip, res, b->msg.fn ? Oradpi_SnapshotObj(b->msg.fn) : Tcl_NewObj());
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("action", -1));
-                Tcl_ListObjAppendElement(ip, res, b->msg.action ? b->msg.action : Tcl_NewObj());
+                Tcl_ListObjAppendElement(ip, res, b->msg.action ? Oradpi_SnapshotObj(b->msg.action) : Tcl_NewObj());
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("sqlstate", -1));
-                Tcl_ListObjAppendElement(ip, res, b->msg.sqlstate ? b->msg.sqlstate : Tcl_NewObj());
+                Tcl_ListObjAppendElement(ip, res, b->msg.sqlstate ? Oradpi_SnapshotObj(b->msg.sqlstate) : Tcl_NewObj());
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("recoverable", -1));
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewBooleanObj(b->msg.recoverable));
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("warning", -1));
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewBooleanObj(b->msg.warning));
                 Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("offset", -1));
-                Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj((int)b->msg.offset));
+                Tcl_ListObjAppendElement(ip, res, Tcl_NewWideIntObj((Tcl_WideInt)(uint64_t)b->msg.offset));
             }
             Tcl_SetObjResult(ip, res);
             return TCL_OK;

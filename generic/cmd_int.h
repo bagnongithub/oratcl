@@ -11,11 +11,63 @@
 #ifndef ORATCL_ODPI_CMD_INT_H
 #define ORATCL_ODPI_CMD_INT_H
 
+#include <stddef.h>
 #include <stdint.h>
+#ifndef USE_TCL_STUBS
+#define USE_TCL_STUBS
+#endif
 #include <tcl.h>
 
 #include "dpi.h"
 #include "state.h"
+
+/* =========================================================================
+ * S-4: Global mutex lock ordering
+ *
+ * All Tcl_Mutex instances in this extension and their ordering constraints.
+ * A thread holding lock N must never attempt to acquire lock N-1 or earlier.
+ *
+ *   1. gCtxMutex        (oratcl_odpi.c) — protects Oradpi_GlobalDpiContext.
+ *                        Acquire before any other module mutex.
+ *   2. gAsyncMutex      (async.c)       — protects gAsyncByKey registry.
+ *                        Acquire before any per-entry ae->lock.
+ *   3. ae->lock          (async.c)       — per-entry async state.
+ *                        Leaf within the async subsystem.
+ *   4. gPoolInitMutex   (async.c)       — protects gPool struct.
+ *                        Leaf lock (no other locks held).
+ *   5. gPool.queueMutex (async.c)       — protects thread pool work queue.
+ *                        Leaf lock (no other locks held).
+ *   6. gConnMapMutex    (state.c)       — protects gConnByName hash table.
+ *                        Leaf lock.
+ *   7. gHandleMutex     (util.c)        — protects handle name counter.
+ *                        Leaf lock.
+ *   8. gTypeInitMutex   (cmd_bind.c)    — protects gBytearrayType one-time init.
+ *                        Leaf lock.
+ *
+ * Leaf locks (4-8) are independent and may be acquired in any order
+ * relative to each other, but never while holding a non-leaf lock (1-3)
+ * if the non-leaf lock's critical section could call into those modules.
+ *
+ * S-5: Worker thread contract — NO Tcl_Interp API in worker threads
+ *
+ * Pool worker threads (async.c) MUST NOT call any Tcl API that requires
+ * a Tcl_Interp* or operates on Tcl_Obj* values.  Workers may only use:
+ *   - Tcl_Mutex / Tcl_Condition (synchronization)
+ *   - Tcl_Alloc / Tcl_Free / Tcl_Realloc (memory)
+ *   - Tcl_Sleep (backoff)
+ *   - Tcl_GetCurrentThread (diagnostic)
+ *   - ODPI-C APIs on their own addRef'd dpiStmt / dpiConn handles
+ * If future features need to report results from a worker to an interp,
+ * use Tcl_ThreadQueueEvent + Tcl_ThreadAlert with deep-copied payloads.
+ *
+ * S-3: Design note — Tcl_GetWideIntFromObj vs Tcl_GetSizeIntFromObj
+ *
+ * ODPI-C APIs uniformly use uint32_t for counts and sizes. This extension
+ * deliberately uses Tcl_GetWideIntFromObj + explicit range checks to
+ * uint32_t rather than Tcl_GetSizeIntFromObj, because the target type
+ * is ODPI's uint32_t (not Tcl_Size), and the manual checks provide
+ * clear error messages identifying the specific overflow.
+ * ========================================================================= */
 
 int Oradpi_Cmd_Autocommit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 int Oradpi_Cmd_Break(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
@@ -47,10 +99,78 @@ Tcl_Obj* Oradpi_NewHandleName(Tcl_Interp* ip, const char* prefix);
 int Oradpi_SetError(Tcl_Interp* ip, OradpiBase* h, int rc, const char* msg);
 int Oradpi_SetErrorFromODPI(Tcl_Interp* ip, OradpiBase* h, const char* fn);
 int Oradpi_SetErrorFromODPIInfo(Tcl_Interp* ip, OradpiBase* h, const char* where, const dpiErrorInfo* ei);
-int Oradpi_IsNumberObj(Tcl_Obj* o, long long* asInt, double* asDbl, int* isInt);
 void Oradpi_RecordRows(OradpiBase* h, uint64_t rows);
 void Oradpi_UpdateStmtType(OradpiStmt* s);
 void Oradpi_FreeMsg(OradpiMsg* m);
+
+extern dpiContext* Oradpi_GlobalDpiContext;
+dpiContext* Oradpi_GetDpiContext(void);
+int Oradpi_CaptureODPIError(dpiErrorInfo* ei);
+
+#define ORATCL_NAMESPACE "::oratcl"
+
+#define ORADPI_FO_CLASS_NETWORK 0x01u
+#define ORADPI_FO_CLASS_CONNLOST 0x02u
+
+#define ORA_ERR_BROKEN_PIPE 3113
+#define ORA_ERR_NOT_CONNECTED 3114
+#define ORA_ERR_LOST_CONTACT 3135
+#define ORA_ERR_TNS_LOST_CONTACT 12547
+
+static inline Tcl_Obj* Oradpi_NewUInt32Obj(uint32_t value)
+{
+    return Tcl_NewWideIntObj((Tcl_WideInt)(uint64_t)value);
+}
+
+static inline Tcl_Obj* Oradpi_SnapshotObj(Tcl_Obj* obj)
+{
+    return obj ? Tcl_DuplicateObj(obj) : Tcl_NewObj();
+}
+
+static inline int Oradpi_CheckedTclSizeToSizeT(Tcl_Interp* ip, Tcl_Size len, size_t* out, const char* what)
+{
+    if (len < 0)
+    {
+        if (ip)
+            Tcl_SetObjResult(ip, Tcl_ObjPrintf("%s is negative", what ? what : "size"));
+        return TCL_ERROR;
+    }
+    if ((uint64_t)len > (uint64_t)((size_t)-1))
+    {
+        if (ip)
+            Tcl_SetObjResult(ip, Tcl_ObjPrintf("%s exceeds size_t range", what ? what : "size"));
+        return TCL_ERROR;
+    }
+    *out = (size_t)len;
+    return TCL_OK;
+}
+
+static inline int Oradpi_CheckedU64ToSizeT(Tcl_Interp* ip, uint64_t len, size_t* out, const char* what)
+{
+    if (len > (uint64_t)((size_t)-1))
+    {
+        if (ip)
+            Tcl_SetObjResult(ip, Tcl_ObjPrintf("%s exceeds size_t range", what ? what : "size"));
+        return TCL_ERROR;
+    }
+    *out = (size_t)len;
+    return TCL_OK;
+}
+
+static inline int Oradpi_CheckedAllocBytes(Tcl_Interp* ip, Tcl_Size count, size_t elemSize, size_t* out, const char* what)
+{
+    size_t countSize = 0;
+    if (Oradpi_CheckedTclSizeToSizeT(ip, count, &countSize, what) != TCL_OK)
+        return TCL_ERROR;
+    if (elemSize != 0 && countSize > ((size_t)-1) / elemSize)
+    {
+        if (ip)
+            Tcl_SetObjResult(ip, Tcl_ObjPrintf("%s allocation overflows size_t", what ? what : "buffer"));
+        return TCL_ERROR;
+    }
+    *out = countSize * elemSize;
+    return TCL_OK;
+}
 
 /* State ops */
 OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool);

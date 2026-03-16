@@ -5,21 +5,31 @@ namespace import ::tcltest::*
 source [file join [file dirname [info script]] 00-setup.test]
 
 test 30-1.0 {create a few worker threads that each run a query} -constraints {have_connect have_thread} -body {
-    # Create 4 threads; each does: package require, connect, select 1, clean up
+    # Create 4 threads; each does: package require, connect, select 1, clean up.
+    # The entire worker script is wrapped in try/finally so thread::exit always
+    # runs — without this, a package-load failure leaves the thread in its event
+    # loop and thread::join hangs forever.
     set tids {}
     for {set i 0} {$i < 4} {incr i} {
         set tid [thread::create -joinable]
         lappend tids $tid
         thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
-        thread::send $tid {package require oratcl 9.0}
-        thread::send $tid {
-            set L [oralogon $::env(ORATCL_CONNECT)]
-            set S [oraopen $L]
-            oraparse $S {select 1 from dual}
-            oraexec $S
-            oraclose $S
-            oralogoff $L
-            return 1
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    package require oratcl 9.0
+                    set L [oralogon $::env(ORATCL_CONNECT)]
+                    set S [oraopen $L]
+                    oraparse $S {select 1 from dual}
+                    oraexec $S
+                    oraclose $S
+                    oralogoff $L
+                    set _rc 0
+                } finally {
+                    thread::exit $_rc
+                }
+            }
         }
     }
     # Join and collect results
