@@ -14,6 +14,7 @@
  */
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #ifndef USE_TCL_STUBS
@@ -133,31 +134,36 @@ static void Oradpi_FailoverTimerProc(void* clientData)
      * cannot fail on an unshared list, but we check for defensive correctness. */
     Tcl_Obj* cmd = Tcl_DuplicateObj(co->failoverCallback);
     Tcl_IncrRefCount(cmd);
-    if (Tcl_ListObjAppendElement(co->ownerIp, cmd, co->base.name) != TCL_OK ||
-        Tcl_ListObjAppendElement(co->ownerIp, cmd, Tcl_NewStringObj("recoverable", -1)) != TCL_OK ||
-        Tcl_ListObjAppendElement(co->ownerIp, cmd, co->foPendingMsg ? co->foPendingMsg : Tcl_NewStringObj("", -1)) != TCL_OK)
+
+    /* V-4 fix: snapshot foPendingMsg into a local and detach from co BEFORE
+     * eval, because the callback can legally call oralogoff and free co. */
+    Tcl_Obj* pendingMsg = co->foPendingMsg;
+    if (pendingMsg)
+        Tcl_IncrRefCount(pendingMsg);
+    co->foPendingMsg = NULL;
+
+    Tcl_Interp* evalIp = co->ownerIp;
+
+    if (Tcl_ListObjAppendElement(evalIp, cmd, co->base.name) != TCL_OK ||
+        Tcl_ListObjAppendElement(evalIp, cmd, Tcl_NewStringObj("recoverable", -1)) != TCL_OK ||
+        Tcl_ListObjAppendElement(evalIp, cmd, pendingMsg ? pendingMsg : Tcl_NewStringObj("", -1)) != TCL_OK)
     {
         Tcl_DecrRefCount(cmd);
-        if (co->foPendingMsg)
-        {
-            Tcl_DecrRefCount(co->foPendingMsg);
-            co->foPendingMsg = NULL;
-        }
+        if (pendingMsg)
+            Tcl_DecrRefCount(pendingMsg);
         return;
     }
 
     /* m-4 fix: Report callback errors via Tcl_BackgroundException
      * instead of silently discarding them. */
-    int evalRc = Tcl_EvalObjEx(co->ownerIp, cmd, TCL_EVAL_GLOBAL);
+    int evalRc = Tcl_EvalObjEx(evalIp, cmd, TCL_EVAL_GLOBAL);
     if (evalRc != TCL_OK)
-        Tcl_BackgroundException(co->ownerIp, evalRc);
+        Tcl_BackgroundException(evalIp, evalRc);
     Tcl_DecrRefCount(cmd);
 
-    if (co->foPendingMsg)
-    {
-        Tcl_DecrRefCount(co->foPendingMsg);
-        co->foPendingMsg = NULL;
-    }
+    /* V-4 fix: only touch locals after eval, never dereference co */
+    if (pendingMsg)
+        Tcl_DecrRefCount(pendingMsg);
 }
 
 static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags)
@@ -195,7 +201,9 @@ static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags)
     /* Start debounce timer if not already scheduled */
     if (!co->foTimerScheduled)
     {
-        int delay = (int)(co->foDebounceMs ? co->foDebounceMs : 250);
+        /* V-5 fix: clamp uint32_t to int range to prevent negative wrap */
+        uint32_t ms = co->foDebounceMs ? co->foDebounceMs : 250;
+        int delay = (ms > (uint32_t)INT_MAX) ? INT_MAX : (int)ms;
         co->foTimer = Tcl_CreateTimerHandler(delay, Oradpi_FailoverTimerProc, co);
         co->foTimerScheduled = 1;
     }

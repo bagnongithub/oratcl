@@ -43,7 +43,9 @@ static void Oradpi_ParseConnect(const char* cs,
 
 /* m-2: Parse connect string with support for double-quoted passwords.
  * Format: user/"pass@word"@db  or  user/password@db  or  /  (ext auth)
- * Passwords containing @ or / must be double-quoted. */
+ * Passwords containing @ or / must be double-quoted.
+ * V-7 fix: all length computations use size_t with range checks before
+ * narrowing to uint32_t, preventing truncation on pathological inputs. */
 static void Oradpi_ParseConnect(const char* cs,
                                 const char** user,
                                 uint32_t* ulen,
@@ -60,6 +62,9 @@ static void Oradpi_ParseConnect(const char* cs,
         return;
     const char* slash = strchr(cs, '/');
 
+    /* Helper macro: safely narrow a size_t to uint32_t, clamping at UINT32_MAX */
+#define SAFE_U32(sz) ((sz) > UINT32_MAX ? (uint32_t)UINT32_MAX : (uint32_t)(sz))
+
     /* External auth: starts with / */
     if (cs[0] == '/' && (!slash || slash == cs))
     {
@@ -68,7 +73,7 @@ static void Oradpi_ParseConnect(const char* cs,
         if (at && at[1])
         {
             *db = at + 1;
-            *dblen = (uint32_t)strlen(*db);
+            *dblen = SAFE_U32(strlen(*db));
         }
         return;
     }
@@ -77,25 +82,25 @@ static void Oradpi_ParseConnect(const char* cs,
     if (slash && slash[1] == '"')
     {
         *user = cs;
-        *ulen = (uint32_t)(slash - cs);
+        *ulen = SAFE_U32((size_t)(slash - cs));
         const char* pwStart = slash + 2; /* skip /" */
         const char* closeQuote = strchr(pwStart, '"');
         if (closeQuote)
         {
             *pw = pwStart;
-            *plen = (uint32_t)(closeQuote - pwStart);
+            *plen = SAFE_U32((size_t)(closeQuote - pwStart));
             /* After closing quote, expect @ or end of string */
             if (closeQuote[1] == '@' && closeQuote[2])
             {
                 *db = closeQuote + 2;
-                *dblen = (uint32_t)strlen(*db);
+                *dblen = SAFE_U32(strlen(*db));
             }
         }
         else
         {
             /* No closing quote — treat entire remainder as password */
             *pw = pwStart;
-            *plen = (uint32_t)strlen(pwStart);
+            *plen = SAFE_U32(strlen(pwStart));
         }
         return;
     }
@@ -107,33 +112,34 @@ static void Oradpi_ParseConnect(const char* cs,
         if (slash && slash < at)
         {
             *user = cs;
-            *ulen = (uint32_t)(slash - cs);
+            *ulen = SAFE_U32((size_t)(slash - cs));
             *pw = slash + 1;
-            *plen = (uint32_t)(at - slash - 1);
+            *plen = SAFE_U32((size_t)(at - slash - 1));
         }
         else
         {
             *user = cs;
-            *ulen = (uint32_t)(at - cs);
+            *ulen = SAFE_U32((size_t)(at - cs));
         }
         *db = at + 1;
-        *dblen = (uint32_t)strlen(*db);
+        *dblen = SAFE_U32(strlen(*db));
     }
     else
     {
         if (slash)
         {
             *user = cs;
-            *ulen = (uint32_t)(slash - cs);
+            *ulen = SAFE_U32((size_t)(slash - cs));
             *pw = slash + 1;
-            *plen = (uint32_t)strlen(*pw);
+            *plen = SAFE_U32(strlen(*pw));
         }
         else
         {
             *user = cs;
-            *ulen = (uint32_t)strlen(cs);
+            *ulen = SAFE_U32(strlen(cs));
         }
     }
+#undef SAFE_U32
 }
 
 /*

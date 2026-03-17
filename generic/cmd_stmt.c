@@ -19,6 +19,16 @@
 #include "cmd_int.h"
 #include "dpi.h"
 
+/* V-8 fix: checked list-append macro for compliance with Tcl error-code rules.
+ * Practically cannot fail on freshly-created unshared lists, but checking
+ * satisfies the "always check TCL_OK/TCL_ERROR" baseline. */
+#define LAPPEND_CHK(ip, list, obj)                                                                                               \
+    do                                                                                                                           \
+    {                                                                                                                            \
+        if (Tcl_ListObjAppendElement((ip), (list), (obj)) != TCL_OK)                                                             \
+            return TCL_ERROR;                                                                                                    \
+    } while (0)
+
 #ifndef DPI_DEFAULT_FETCH_ARRAY_SIZE
 #define DPI_DEFAULT_FETCH_ARRAY_SIZE 100
 #endif
@@ -134,43 +144,43 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
         Tcl_Obj* res = Tcl_NewListObj(0, NULL);
         if (co->conn && dpiConn_getStmtCacheSize(co->conn, &v) == DPI_SUCCESS)
             co->stmtCacheSize = v;
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("stmtcachesize", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->stmtCacheSize));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("stmtcachesize", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->stmtCacheSize));
 
         uint32_t fas = co->fetchArraySize ? co->fetchArraySize : DPI_DEFAULT_FETCH_ARRAY_SIZE;
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("fetcharraysize", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(fas));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("fetcharraysize", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(fas));
 
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("prefetchrows", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->prefetchRows));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("prefetchmemory", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->prefetchMemory));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("prefetchrows", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->prefetchRows));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("prefetchmemory", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->prefetchMemory));
 
         if (co->conn && dpiConn_getCallTimeout(co->conn, &v) == DPI_SUCCESS)
             co->callTimeout = v;
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("calltimeout", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->callTimeout));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("calltimeout", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->callTimeout));
 
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("inlineLobs", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewBooleanObj(co->inlineLobs ? 1 : 0));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("inlineLobs", -1));
+        LAPPEND_CHK(ip, res, Tcl_NewBooleanObj(co->inlineLobs ? 1 : 0));
 
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foMaxAttempts", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->foMaxAttempts));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foBackoffMs", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->foBackoffMs));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foBackoffFactor", -1));
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewDoubleObj(co->foBackoffFactor));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("foMaxAttempts", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->foMaxAttempts));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("foBackoffMs", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->foBackoffMs));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("foBackoffFactor", -1));
+        LAPPEND_CHK(ip, res, Tcl_NewDoubleObj(co->foBackoffFactor));
 
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foErrorClasses", -1));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("foErrorClasses", -1));
         Tcl_Obj* classes = Tcl_NewListObj(0, NULL);
         if (co->foErrorClasses & ORADPI_FO_CLASS_NETWORK)
-            Tcl_ListObjAppendElement(ip, classes, Tcl_NewStringObj("network", -1));
+            LAPPEND_CHK(ip, classes, Tcl_NewStringObj("network", -1));
         if (co->foErrorClasses & ORADPI_FO_CLASS_CONNLOST)
-            Tcl_ListObjAppendElement(ip, classes, Tcl_NewStringObj("connlost", -1));
-        Tcl_ListObjAppendElement(ip, res, classes);
+            LAPPEND_CHK(ip, classes, Tcl_NewStringObj("connlost", -1));
+        LAPPEND_CHK(ip, res, classes);
 
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("foDebounceMs", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(co->foDebounceMs));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("foDebounceMs", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->foDebounceMs));
 
         Tcl_SetObjResult(ip, res);
         return TCL_OK;
@@ -228,9 +238,9 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
             {
                 Tcl_Obj* classes = Tcl_NewListObj(0, NULL);
                 if (co->foErrorClasses & ORADPI_FO_CLASS_NETWORK)
-                    Tcl_ListObjAppendElement(ip, classes, Tcl_NewStringObj("network", -1));
+                    LAPPEND_CHK(ip, classes, Tcl_NewStringObj("network", -1));
                 if (co->foErrorClasses & ORADPI_FO_CLASS_CONNLOST)
-                    Tcl_ListObjAppendElement(ip, classes, Tcl_NewStringObj("connlost", -1));
+                    LAPPEND_CHK(ip, classes, Tcl_NewStringObj("connlost", -1));
                 Tcl_SetObjResult(ip, classes);
                 return TCL_OK;
             }
@@ -372,13 +382,13 @@ static int Oradpi_ConfigStmt(Tcl_Interp* ip, OradpiStmt* s, Tcl_Size objc, Tcl_O
     if (objc == 2)
     {
         Tcl_Obj* res = Tcl_NewListObj(0, NULL);
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("fetchrows", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(s->fetchArray));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("fetchrows", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(s->fetchArray));
         uint32_t pr = s->prefetchRows ? s->prefetchRows : (s->owner ? s->owner->prefetchRows : 0);
         if (s->stmt)
             (void)dpiStmt_getPrefetchRows(s->stmt, &pr);
-        Tcl_ListObjAppendElement(ip, res, Tcl_NewStringObj("prefetchrows", -1));
-        Tcl_ListObjAppendElement(ip, res, Oradpi_NewUInt32Obj(pr));
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("prefetchrows", -1));
+        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(pr));
         Tcl_SetObjResult(ip, res);
         return TCL_OK;
     }

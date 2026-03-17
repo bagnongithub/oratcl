@@ -87,7 +87,12 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
     uint32_t backoffMs = s->owner ? s->owner->foBackoffMs : 100;
     double backoffFact = s->owner ? s->owner->foBackoffFactor : 2.0;
     uint32_t errClasses = s->owner ? s->owner->foErrorClasses : 0;
-    uint32_t totalTries = (maxAttempts > 0 && errClasses) ? maxAttempts + 1 : 1;
+    /* V-6 fix: overflow-safe totalTries computation */
+    uint32_t totalTries;
+    if (maxAttempts > 0 && errClasses)
+        totalTries = (maxAttempts >= UINT32_MAX) ? UINT32_MAX : maxAttempts + 1;
+    else
+        totalTries = 1;
 
     int execRc = DPI_FAILURE;
     uint32_t nqc = 0;
@@ -192,6 +197,9 @@ int Oradpi_Cmd_StmtSql(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const o
         return Oradpi_SetError(ip, NULL, -1, "invalid statement handle");
     if (!s->owner || !s->owner->conn)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "connection closed");
+    /* V-3 fix: refuse to replace statement while async execution is in flight */
+    if (Oradpi_StmtIsAsyncBusy(s))
+        return Oradpi_SetError(ip, (OradpiBase*)s, -1, "statement is busy (async operation in progress)");
 
     int doCommit = 0;
     int parseOnly = 0;
@@ -272,6 +280,9 @@ int Oradpi_Cmd_Plexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
         return Oradpi_SetError(ip, NULL, -1, "invalid statement handle");
     if (!s->owner || !s->owner->conn)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "connection closed");
+    /* V-3 fix: refuse to replace statement while async execution is in flight */
+    if (Oradpi_StmtIsAsyncBusy(s))
+        return Oradpi_SetError(ip, (OradpiBase*)s, -1, "statement is busy (async operation in progress)");
 
     if (blockObj)
     {

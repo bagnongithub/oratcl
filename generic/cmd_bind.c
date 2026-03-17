@@ -16,6 +16,10 @@
 
 #include <limits.h>
 #include <string.h>
+/* V-9 fix: strncasecmp is declared in <strings.h> on POSIX, not <string.h> */
+#ifndef _WIN32
+#include <strings.h>
+#endif
 
 #include "cmd_int.h"
 #include "dpi.h"
@@ -636,6 +640,9 @@ int Oradpi_Cmd_Orabind(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const o
         return Oradpi_SetError(ip, NULL, -1, "invalid statement handle");
     if (!s->stmt || !s->owner || !s->owner->conn)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "statement is not prepared or connection closed");
+    /* V-3 fix: refuse to bind while async execution is in flight */
+    if (Oradpi_StmtIsAsyncBusy(s))
+        return Oradpi_SetError(ip, (OradpiBase*)s, -1, "statement is busy (async operation in progress)");
 
     const char* stmtKey = Tcl_GetString(objv[1]);
     OradpiPendingRefs* pr = GetPendings(ip, stmtKey);
@@ -728,6 +735,9 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
         return Oradpi_SetError(ip, NULL, -1, "invalid statement handle");
     if (!s->stmt || !s->owner || !s->owner->conn)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "statement is not prepared or connection closed");
+    /* V-3 fix: refuse to bind+exec while async execution is in flight */
+    if (Oradpi_StmtIsAsyncBusy(s))
+        return Oradpi_SetError(ip, (OradpiBase*)s, -1, "statement is busy (async operation in progress)");
 
     int doCommit = 0;
     int arrayDml = 0;
