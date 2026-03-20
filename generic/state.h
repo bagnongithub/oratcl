@@ -43,6 +43,8 @@
 #define PENDING_ASSOC "oradpi.pending"
 #endif
 
+typedef struct GlobalConnRec GlobalConnRec;
+
 typedef struct OradpiMsg
 {
     int rc;
@@ -101,9 +103,17 @@ typedef struct OradpiConn
     Tcl_Obj* foPendingMsg;
 
     /* Cross-interp adoption control:
-       - ownerClose: the interpreter that created the connection will perform dpiConn_close().
-       - adopters only dpiConn_release() their addRef'ed handle. */
+       - ownerClose: the interpreter that created the connection performs
+         dpiConn_close(); adopters only dpiConn_release() their addRef'ed
+         handle.
+       - shared: refcounted process-global adoption record for this dpiConn*.
+         It owns the shared per-connection gate used to serialize ODPI calls
+         across the owner wrapper, adopted wrappers, and async workers.
+       - Callers must use Oradpi_ConnGateEnter/Leave (or the CONN_GATE_* macros)
+         instead of locking any per-wrapper field directly. */
     int ownerClose;
+    GlobalConnRec* shared; /* shared per-dpiConn gate and adoption record */
+    int adopted;           /* nonzero if this handle was adopted from another interp */
 } OradpiConn;
 
 typedef struct OradpiStmt
@@ -134,5 +144,19 @@ typedef struct OradpiInterpState
 } OradpiInterpState;
 
 OradpiLob* Oradpi_LookupLob(Tcl_Interp* ip, Tcl_Obj* nameObj);
+
+/* Shared adopted-connection gate APIs. */
+void Oradpi_ConnGateEnter(OradpiConn* co);
+int Oradpi_ConnGateEnterTimed(OradpiConn* co, int timeoutMs);
+void Oradpi_ConnGateLeave(OradpiConn* co);
+void Oradpi_ConnBreak(OradpiConn* co);
+
+void Oradpi_SharedConnAddRef(GlobalConnRec* gr);
+void Oradpi_SharedConnRelease(GlobalConnRec* gr);
+void Oradpi_SharedConnGateEnter(GlobalConnRec* gr);
+int Oradpi_SharedConnGateEnterTimed(GlobalConnRec* gr, int timeoutMs);
+void Oradpi_SharedConnGateLeave(GlobalConnRec* gr);
+void Oradpi_SharedConnBreak(GlobalConnRec* gr, dpiConn* conn);
+void* Oradpi_ConnGateToken(OradpiConn* co);
 
 #endif /* ORATCL_ODPI_STATE_H */

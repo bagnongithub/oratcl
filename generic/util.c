@@ -15,7 +15,6 @@
 
 #include <inttypes.h>
 #include <limits.h>
-#include <stdio.h>
 #include <string.h>
 #ifndef USE_TCL_STUBS
 #define USE_TCL_STUBS
@@ -79,8 +78,16 @@ void Oradpi_UpdateStmtType(OradpiStmt* s)
     if (!s || !s->stmt)
         return;
     dpiStmtInfo info;
+    if (s->owner)
+        CONN_GATE_ENTER(s->owner);
     if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS)
+    {
+        if (s->owner)
+            CONN_GATE_LEAVE(s->owner);
         return;
+    }
+    if (s->owner)
+        CONN_GATE_LEAVE(s->owner);
     int t = 0;
     if (info.isQuery)
         t = 1;
@@ -136,10 +143,14 @@ static void Oradpi_FailoverTimerProc(void* clientData)
     Tcl_IncrRefCount(cmd);
 
     /* V-4 fix: snapshot foPendingMsg into a local and detach from co BEFORE
-     * eval, because the callback can legally call oralogoff and free co. */
+     * eval, because the callback can legally call oralogoff and free co.
+     * V-6 fix: transfer ownership instead of leaking — decrement the
+     * connection-held ref after acquiring the local ref. */
     Tcl_Obj* pendingMsg = co->foPendingMsg;
     if (pendingMsg)
         Tcl_IncrRefCount(pendingMsg);
+    if (co->foPendingMsg)
+        Tcl_DecrRefCount(co->foPendingMsg);
     co->foPendingMsg = NULL;
 
     Tcl_Interp* evalIp = co->ownerIp;

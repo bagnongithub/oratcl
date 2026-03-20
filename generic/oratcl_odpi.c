@@ -33,6 +33,7 @@ int Oradpi_DpiContextEnsure(Tcl_Interp* ip);
 static void Oradpi_ProcessExit(void* unused);
 static void Oratcl_InterpDeleteProc(void* clientData, Tcl_Interp* ip);
 static void RegisterCommands(Tcl_Interp* ip);
+static int Oradpi_Cmd_InternalConnGateId(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 DLLEXPORT int oratcl_Init(Tcl_Interp* ip);
 DLLEXPORT int oratcl_SafeInit(Tcl_Interp* ip);
 
@@ -123,11 +124,32 @@ static void RegisterCommand(Tcl_Interp* ip, Tcl_Namespace* nsPtr, const char* na
     }
 }
 
+/* Internal test hook: expose the shared connection-gate identity for a
+ * connection handle.  This is intentionally registered only in the internal
+ * namespace and is not exported. */
+static int Oradpi_Cmd_InternalConnGateId(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
+{
+    (void)cd;
+    if (objc != 2)
+    {
+        Tcl_WrongNumArgs(ip, 1, objv, "connection-handle");
+        return TCL_ERROR;
+    }
+    OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
+    if (!co)
+        return Oradpi_SetError(ip, NULL, -1, "invalid connection handle");
+    Tcl_SetObjResult(ip, Tcl_ObjPrintf("%p", Oradpi_ConnGateToken(co)));
+    return TCL_OK;
+}
+
 static void RegisterCommands(Tcl_Interp* ip)
 {
     Tcl_Namespace* nsPtr = Tcl_FindNamespace(ip, ORATCL_NAMESPACE, NULL, 0);
+    Tcl_Namespace* internalNs = Tcl_FindNamespace(ip, ORATCL_NAMESPACE "::internal", NULL, 0);
     if (!nsPtr)
         nsPtr = Tcl_CreateNamespace(ip, ORATCL_NAMESPACE, NULL, NULL);
+    if (!internalNs)
+        internalNs = Tcl_CreateNamespace(ip, ORATCL_NAMESPACE "::internal", NULL, NULL);
 
     RegisterCommand(ip, nsPtr, "oralogon", Oradpi_Cmd_Logon);
     RegisterCommand(ip, nsPtr, "oralogoff", Oradpi_Cmd_Logoff);
@@ -156,6 +178,9 @@ static void RegisterCommands(Tcl_Interp* ip)
     RegisterCommand(ip, nsPtr, "oraexecasync", Oradpi_Cmd_ExecAsync);
     RegisterCommand(ip, nsPtr, "orawaitasync", Oradpi_Cmd_WaitAsync);
 
+    if (internalNs)
+        Tcl_CreateObjCommand2(ip, ORATCL_NAMESPACE "::internal::connGateId", Oradpi_Cmd_InternalConnGateId, NULL, NULL);
+
     /* Export all commands so users can [namespace import ::oratcl::*] */
     if (nsPtr)
         Tcl_Export(ip, nsPtr, "ora*", 0);
@@ -173,13 +198,6 @@ static void Oratcl_InterpDeleteProc(void* clientData, Tcl_Interp* ip)
      * the ORATCL_INTERP_MARK sentinel that prevents double-registration of
      * commands when the package is loaded more than once in the same interp. */
 }
-
-/* S-5: Centralized version strings.
- * ORATCL_VERSION: the oratcl package version — must match configure.ac,
- * pkgIndex.tcl, and the Makefile's PACKAGE_VERSION.
- * ORATCL_TCL_MIN: minimum Tcl version required by this extension. */
-#define ORATCL_VERSION "9.0"
-#define ORATCL_TCL_MIN "9.0"
 
 DLLEXPORT int oratcl_Init(Tcl_Interp* ip)
 {

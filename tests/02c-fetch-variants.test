@@ -30,3 +30,21 @@ test 02c-1.0 {-asdict + -resultvariable} -constraints {have_connect} -body {
         set rows
     }
 } -result {1 A 2 B}
+
+
+test 02c-1.1 {-resultvariable captures fetched row batches while rc stays numeric} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_ft $L]
+        set S [oraopen $L]
+        oraparse $S "select id, name from $T order by id"
+        oraexec  $S
+        set rc1 [orafetch $S -resultvariable rows -max 1]
+        set batch1 $rows
+        set rc2 [orafetch $S -resultvariable rows -max 1]
+        set batch2 $rows
+        set rc3 [orafetch $S -resultvariable rows -max 1]
+        set batch3 $rows
+        oraclose $S
+        list $rc1 $batch1 $rc2 $batch2 $rc3 $batch3
+    }
+} -result {0 {{1 A}} 0 {{2 B}} 1403 {}}

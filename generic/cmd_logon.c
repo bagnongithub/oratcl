@@ -28,14 +28,14 @@ int Oradpi_Cmd_Break(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
 int Oradpi_Cmd_Info(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
 int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
-static void Oradpi_ParseConnect(const char* cs,
-                                const char** user,
-                                uint32_t* ulen,
-                                const char** pw,
-                                uint32_t* plen,
-                                const char** db,
-                                uint32_t* dblen,
-                                int* extAuth);
+static int Oradpi_ParseConnect(const char* cs,
+                               const char** user,
+                               uint32_t* ulen,
+                               const char** pw,
+                               uint32_t* plen,
+                               const char** db,
+                               uint32_t* dblen,
+                               int* extAuth);
 
 /* ------------------------------------------------------------------------- *
  * Implementation
@@ -45,25 +45,34 @@ static void Oradpi_ParseConnect(const char* cs,
  * Format: user/"pass@word"@db  or  user/password@db  or  /  (ext auth)
  * Passwords containing @ or / must be double-quoted.
  * V-7 fix: all length computations use size_t with range checks before
- * narrowing to uint32_t, preventing truncation on pathological inputs. */
-static void Oradpi_ParseConnect(const char* cs,
-                                const char** user,
-                                uint32_t* ulen,
-                                const char** pw,
-                                uint32_t* plen,
-                                const char** db,
-                                uint32_t* dblen,
-                                int* extAuth)
+ * narrowing to uint32_t, preventing truncation on pathological inputs.
+ * V-6 fix: reject overflow instead of silently clamping — returns 0 on
+ * success, -1 if any component exceeds uint32_t range. */
+static int Oradpi_ParseConnect(const char* cs,
+                               const char** user,
+                               uint32_t* ulen,
+                               const char** pw,
+                               uint32_t* plen,
+                               const char** db,
+                               uint32_t* dblen,
+                               int* extAuth)
 {
     *user = *pw = *db = NULL;
     *ulen = *plen = *dblen = 0;
     *extAuth = 0;
     if (!cs)
-        return;
+        return 0;
     const char* slash = strchr(cs, '/');
 
-    /* Helper macro: safely narrow a size_t to uint32_t, clamping at UINT32_MAX */
-#define SAFE_U32(sz) ((sz) > UINT32_MAX ? (uint32_t)UINT32_MAX : (uint32_t)(sz))
+    /* Helper macro: safely narrow a size_t to uint32_t, failing on overflow */
+#define SAFE_U32(dst, sz)                                                                                                        \
+    do                                                                                                                           \
+    {                                                                                                                            \
+        size_t _v = (sz);                                                                                                        \
+        if (_v > UINT32_MAX)                                                                                                     \
+            return -1;                                                                                                           \
+        (dst) = (uint32_t)_v;                                                                                                    \
+    } while (0)
 
     /* External auth: starts with / */
     if (cs[0] == '/' && (!slash || slash == cs))
@@ -73,36 +82,36 @@ static void Oradpi_ParseConnect(const char* cs,
         if (at && at[1])
         {
             *db = at + 1;
-            *dblen = SAFE_U32(strlen(*db));
+            SAFE_U32(*dblen, strlen(*db));
         }
-        return;
+        return 0;
     }
 
     /* Look for quoted password: user/"..."@db */
     if (slash && slash[1] == '"')
     {
         *user = cs;
-        *ulen = SAFE_U32((size_t)(slash - cs));
+        SAFE_U32(*ulen, (size_t)(slash - cs));
         const char* pwStart = slash + 2; /* skip /" */
         const char* closeQuote = strchr(pwStart, '"');
         if (closeQuote)
         {
             *pw = pwStart;
-            *plen = SAFE_U32((size_t)(closeQuote - pwStart));
+            SAFE_U32(*plen, (size_t)(closeQuote - pwStart));
             /* After closing quote, expect @ or end of string */
             if (closeQuote[1] == '@' && closeQuote[2])
             {
                 *db = closeQuote + 2;
-                *dblen = SAFE_U32(strlen(*db));
+                SAFE_U32(*dblen, strlen(*db));
             }
         }
         else
         {
             /* No closing quote — treat entire remainder as password */
             *pw = pwStart;
-            *plen = SAFE_U32(strlen(pwStart));
+            SAFE_U32(*plen, strlen(pwStart));
         }
-        return;
+        return 0;
     }
 
     /* Unquoted: original logic using first @ and first / */
@@ -112,34 +121,35 @@ static void Oradpi_ParseConnect(const char* cs,
         if (slash && slash < at)
         {
             *user = cs;
-            *ulen = SAFE_U32((size_t)(slash - cs));
+            SAFE_U32(*ulen, (size_t)(slash - cs));
             *pw = slash + 1;
-            *plen = SAFE_U32((size_t)(at - slash - 1));
+            SAFE_U32(*plen, (size_t)(at - slash - 1));
         }
         else
         {
             *user = cs;
-            *ulen = SAFE_U32((size_t)(at - cs));
+            SAFE_U32(*ulen, (size_t)(at - cs));
         }
         *db = at + 1;
-        *dblen = SAFE_U32(strlen(*db));
+        SAFE_U32(*dblen, strlen(*db));
     }
     else
     {
         if (slash)
         {
             *user = cs;
-            *ulen = SAFE_U32((size_t)(slash - cs));
+            SAFE_U32(*ulen, (size_t)(slash - cs));
             *pw = slash + 1;
-            *plen = SAFE_U32(strlen(*pw));
+            SAFE_U32(*plen, strlen(*pw));
         }
         else
         {
             *user = cs;
-            *ulen = SAFE_U32(strlen(cs));
+            SAFE_U32(*ulen, strlen(cs));
         }
     }
 #undef SAFE_U32
+    return 0;
 }
 
 /*
@@ -249,7 +259,10 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     const char *user = NULL, *pw = NULL, *db = NULL;
     uint32_t ulen = 0, plen = 0, dblen = 0;
     int ext = 0;
-    Oradpi_ParseConnect(connstr, &user, &ulen, &pw, &plen, &db, &dblen, &ext);
+    /* V-6 fix: reject pathological connect strings whose components
+     * exceed uint32_t range instead of silently clamping. */
+    if (Oradpi_ParseConnect(connstr, &user, &ulen, &pw, &plen, &db, &dblen, &ext) != 0)
+        return Oradpi_SetError(ip, NULL, -1, "connect string component exceeds maximum length");
 
     dpiContext* ctx = Oradpi_GetDpiContext();
     if (!ctx)
@@ -368,7 +381,10 @@ int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
     if (st)
     {
         Tcl_Size stmtCap = 8, stmtCount = 0;
-        OradpiStmt** stmtsToFree = (OradpiStmt**)Tcl_Alloc(sizeof(OradpiStmt*) * (size_t)stmtCap);
+        size_t stmtBytes = 0;
+        if (Oradpi_CheckedAllocBytes(ip, stmtCap, sizeof(OradpiStmt*), &stmtBytes, "statement teardown table") != TCL_OK)
+            return TCL_ERROR;
+        OradpiStmt** stmtsToFree = (OradpiStmt**)Tcl_Alloc(stmtBytes);
 
         Tcl_HashSearch sSearch;
         Tcl_HashEntry* sEntry;
@@ -379,8 +395,22 @@ int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
             {
                 if (stmtCount == stmtCap)
                 {
-                    stmtCap *= 2;
-                    stmtsToFree = (OradpiStmt**)Tcl_Realloc((char*)stmtsToFree, sizeof(OradpiStmt*) * (size_t)stmtCap);
+                    Tcl_Size newCap = 0;
+                    size_t stmtBytes = 0;
+                    if (stmtCap > TCL_SIZE_MAX / 2)
+                    {
+                        Tcl_Free((char*)stmtsToFree);
+                        return Oradpi_SetError(ip, (OradpiBase*)co, -1, "statement teardown table is too large");
+                    }
+                    newCap = stmtCap * 2;
+                    if (Oradpi_CheckedAllocBytes(ip, newCap, sizeof(OradpiStmt*), &stmtBytes, "statement teardown table") !=
+                        TCL_OK)
+                    {
+                        Tcl_Free((char*)stmtsToFree);
+                        return TCL_ERROR;
+                    }
+                    stmtsToFree = (OradpiStmt**)Tcl_Realloc((char*)stmtsToFree, stmtBytes);
+                    stmtCap = newCap;
                 }
                 stmtsToFree[stmtCount++] = s;
             }
@@ -434,8 +464,7 @@ int Oradpi_Cmd_Break(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
-    if (dpiConn_breakExecution(co->conn) != DPI_SUCCESS)
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)co, "dpiConn_breakExecution");
+    CONN_BREAK(co);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }
@@ -452,8 +481,10 @@ int Oradpi_Cmd_Info(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
     Tcl_Obj* d = Tcl_NewListObj(0, NULL);
-    Tcl_ListObjAppendElement(ip, d, Tcl_NewStringObj("autocommit", -1));
-    Tcl_ListObjAppendElement(ip, d, Tcl_NewBooleanObj(co->autocommit));
+    Tcl_IncrRefCount(d);
+    LAPPEND_CHK(ip, d, Tcl_NewStringObj("autocommit", -1));
+    LAPPEND_CHK(ip, d, Tcl_NewBooleanObj(co->autocommit));
     Tcl_SetObjResult(ip, d);
+    Tcl_DecrRefCount(d);
     return TCL_OK;
 }

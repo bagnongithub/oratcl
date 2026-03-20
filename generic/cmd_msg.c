@@ -17,14 +17,6 @@
 
 #include "cmd_int.h"
 
-/* V-8 fix: checked list-append macro */
-#define LAPPEND_CHK(ip, list, obj)                                                                                               \
-    do                                                                                                                           \
-    {                                                                                                                            \
-        if (Tcl_ListObjAppendElement((ip), (list), (obj)) != TCL_OK)                                                             \
-            return TCL_ERROR;                                                                                                    \
-    } while (0)
-
 /* ==========================================================================
  * Forward Declarations
  * ========================================================================== */

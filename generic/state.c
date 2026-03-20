@@ -14,6 +14,7 @@
  *
  */
 
+#include <stdatomic.h>
 #include <string.h>
 
 #include "cmd_int.h"
@@ -22,12 +23,11 @@
  * Forward Declarations
  * ========================================================================== */
 
-static void GlobalConn_Erase(const char* name);
-static dpiConn* GlobalConn_Lookup(const char* name, int* pOwnerAlive);
-static void GlobalConn_MarkOwnerGone(const char* name);
-static void GlobalConn_Publish(const char* name, dpiConn* conn);
+static GlobalConnRec* GlobalConn_PublishAndRef(const char* name, dpiConn* conn);
+static GlobalConnRec* GlobalConn_LookupForAdoptAndRef(const char* name, dpiConn** outConn, int* pOwnerAlive);
+static void GlobalConn_MarkOwnerGone(GlobalConnRec* gr);
 static void GlobalConnMap_Init(void);
-static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, dpiConn* connFromOwner);
+static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, GlobalConnRec* shared, dpiConn* connFromOwner);
 void Oradpi_DeleteInterpData(void* clientData, Tcl_Interp* ip);
 void Oradpi_FreeConn(OradpiConn* co);
 void Oradpi_FreeMsg(OradpiMsg* m);
@@ -49,8 +49,14 @@ static void Oradpi_RegisterConnInInterp(OradpiInterpState* st, OradpiConn* co);
 
 typedef struct GlobalConnRec
 {
-    dpiConn* conn;
-    int ownerAlive; /* 1 while creator interp hasn't destroyed its OradpiConn/logged off */
+    _Atomic(dpiConn*) pubConn; /* published only while owner is alive */
+    int ownerAlive;            /* 1 while creator interp still owns the live connection */
+    unsigned int refCount;     /* wrappers + async workers */
+    Tcl_Mutex connLock;        /* shared per-dpiConn operation gate */
+    Tcl_Condition connCond;
+    Tcl_ThreadId opOwner; /* recursive ownership for same-thread reentry */
+    unsigned int opDepth;
+    char* nameKey; /* owned copy for hash removal / diagnostics */
 } GlobalConnRec;
 
 /* gConnMapMutex: protects gConnByName hash table and gConnMapInited flag.
@@ -58,6 +64,14 @@ typedef struct GlobalConnRec
 static Tcl_Mutex gConnMapMutex;
 static int gConnMapInited = 0;
 static Tcl_HashTable gConnByName;
+
+static char* GlobalConn_DupName(const char* name)
+{
+    size_t n = strlen(name) + 1u;
+    char* copy = (char*)Tcl_Alloc(n);
+    memcpy(copy, name, n);
+    return copy;
+}
 
 /* M-3: Cleanup handler for process exit — frees all GlobalConnRec entries
  * and destroys the hash table to prevent leaks. */
@@ -73,7 +87,13 @@ static void GlobalConnMap_ExitHandler(void* unused)
         {
             GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
             if (gr)
+            {
+                Tcl_ConditionFinalize(&gr->connCond);
+                Tcl_MutexFinalize(&gr->connLock);
+                if (gr->nameKey)
+                    Tcl_Free(gr->nameKey);
                 Tcl_Free((char*)gr);
+            }
         }
         Tcl_DeleteHashTable(&gConnByName);
         gConnMapInited = 0;
@@ -93,95 +113,243 @@ static void GlobalConnMap_Init(void)
     Tcl_MutexUnlock(&gConnMapMutex);
 }
 
-static void GlobalConn_Publish(const char* name, dpiConn* conn)
+static GlobalConnRec* GlobalConn_PublishAndRef(const char* name, dpiConn* conn)
 {
+    GlobalConnRec* gr = NULL;
+
     GlobalConnMap_Init();
     Tcl_MutexLock(&gConnMapMutex);
     int newEntry = 0;
     Tcl_HashEntry* he = Tcl_CreateHashEntry(&gConnByName, name, &newEntry);
     if (newEntry)
     {
-        GlobalConnRec* gr = (GlobalConnRec*)Tcl_Alloc(sizeof(*gr));
-        gr->conn = conn;
-        gr->ownerAlive = 1;
+        gr = (GlobalConnRec*)Tcl_Alloc(sizeof(*gr));
+        memset(gr, 0, sizeof(*gr));
+        gr->nameKey = GlobalConn_DupName(name);
         Tcl_SetHashValue(he, gr);
     }
     else
     {
-        GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
-        gr->conn = conn;
-        gr->ownerAlive = 1;
+        gr = (GlobalConnRec*)Tcl_GetHashValue(he);
     }
+    gr->ownerAlive = 1;
+    atomic_store_explicit(&gr->pubConn, conn, memory_order_release);
+    gr->refCount++;
     Tcl_MutexUnlock(&gConnMapMutex);
+    return gr;
 }
 
-static dpiConn* GlobalConn_Lookup(const char* name, int* pOwnerAlive)
+static GlobalConnRec* GlobalConn_LookupForAdoptAndRef(const char* name, dpiConn** outConn, int* pOwnerAlive)
 {
+    GlobalConnRec* gr = NULL;
     dpiConn* res = NULL;
     int ownerAlive = 0;
+
     Tcl_MutexLock(&gConnMapMutex);
-    if (!gConnMapInited)
+    if (gConnMapInited)
     {
-        Tcl_MutexUnlock(&gConnMapMutex);
-        if (pOwnerAlive)
-            *pOwnerAlive = 0;
-        return NULL;
-    }
-    Tcl_HashEntry* he = Tcl_FindHashEntry(&gConnByName, name);
-    if (he)
-    {
-        GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
-        res = gr->conn;
-        ownerAlive = gr->ownerAlive;
-        /* addRef while still holding the lock so the owner can't free
-         * the conn between our return and the caller's use (fix 5.2) */
-        if (res && ownerAlive)
-            dpiConn_addRef(res);
+        Tcl_HashEntry* he = Tcl_FindHashEntry(&gConnByName, name);
+        if (he)
+        {
+            gr = (GlobalConnRec*)Tcl_GetHashValue(he);
+            ownerAlive = gr->ownerAlive;
+            res = atomic_load_explicit(&gr->pubConn, memory_order_acquire);
+            if (res && ownerAlive)
+            {
+                if (dpiConn_addRef(res) == DPI_SUCCESS)
+                {
+                    gr->refCount++;
+                }
+                else
+                {
+                    gr = NULL;
+                    res = NULL;
+                }
+            }
+            else
+            {
+                gr = NULL;
+                res = NULL;
+            }
+        }
     }
     Tcl_MutexUnlock(&gConnMapMutex);
+
+    if (outConn)
+        *outConn = res;
     if (pOwnerAlive)
         *pOwnerAlive = ownerAlive;
-    return res;
+    return gr;
 }
 
-static void GlobalConn_MarkOwnerGone(const char* name)
+static void GlobalConn_MarkOwnerGone(GlobalConnRec* gr)
 {
-    Tcl_MutexLock(&gConnMapMutex);
-    if (!gConnMapInited)
-    {
-        Tcl_MutexUnlock(&gConnMapMutex);
+    if (!gr)
         return;
-    }
-    Tcl_HashEntry* he = Tcl_FindHashEntry(&gConnByName, name);
-    if (he)
-    {
-        GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
-        gr->ownerAlive = 0;
-        /* M-6: Null out the conn pointer so GlobalConn_Lookup cannot
-         * hand out a reference to a connection being freed by the owner.
-         * Without this, there's a race window between MarkOwnerGone and
-         * Erase where Lookup could see ownerAlive==0 but conn!=NULL. */
-        gr->conn = NULL;
-    }
+    Tcl_MutexLock(&gConnMapMutex);
+    gr->ownerAlive = 0;
+    atomic_store_explicit(&gr->pubConn, NULL, memory_order_release);
     Tcl_MutexUnlock(&gConnMapMutex);
 }
 
-static void GlobalConn_Erase(const char* name)
+void Oradpi_SharedConnAddRef(GlobalConnRec* gr)
 {
-    Tcl_MutexLock(&gConnMapMutex);
-    if (!gConnMapInited)
-    {
-        Tcl_MutexUnlock(&gConnMapMutex);
+    if (!gr)
         return;
-    }
-    Tcl_HashEntry* he = Tcl_FindHashEntry(&gConnByName, name);
-    if (he)
+    Tcl_MutexLock(&gConnMapMutex);
+    gr->refCount++;
+    Tcl_MutexUnlock(&gConnMapMutex);
+}
+
+void Oradpi_SharedConnRelease(GlobalConnRec* gr)
+{
+    int doFree = 0;
+
+    if (!gr)
+        return;
+
+    Tcl_MutexLock(&gConnMapMutex);
+    if (gr->refCount > 0)
+        gr->refCount--;
+    if (gr->refCount == 0)
     {
-        GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
+        if (gConnMapInited && gr->nameKey)
+        {
+            Tcl_HashEntry* he = Tcl_FindHashEntry(&gConnByName, gr->nameKey);
+            if (he && Tcl_GetHashValue(he) == gr)
+                Tcl_DeleteHashEntry(he);
+        }
+        doFree = 1;
+    }
+    Tcl_MutexUnlock(&gConnMapMutex);
+
+    if (doFree)
+    {
+        Tcl_ConditionFinalize(&gr->connCond);
+        Tcl_MutexFinalize(&gr->connLock);
+        if (gr->nameKey)
+            Tcl_Free(gr->nameKey);
         Tcl_Free((char*)gr);
-        Tcl_DeleteHashEntry(he);
     }
-    Tcl_MutexUnlock(&gConnMapMutex);
+}
+
+static void GlobalConn_DeadlineFromNow(Tcl_Time* deadline, int timeoutMs)
+{
+    Tcl_GetTime(deadline);
+    deadline->sec += timeoutMs / 1000;
+    deadline->usec += (timeoutMs % 1000) * 1000;
+    while (deadline->usec >= 1000000)
+    {
+        deadline->sec++;
+        deadline->usec -= 1000000;
+    }
+}
+
+int Oradpi_SharedConnGateEnterTimed(GlobalConnRec* gr, int timeoutMs)
+{
+    Tcl_ThreadId self;
+
+    if (!gr)
+        return 1;
+
+    self = Tcl_GetCurrentThread();
+    Tcl_MutexLock(&gr->connLock);
+
+    if (gr->opDepth > 0 && gr->opOwner == self)
+    {
+        gr->opDepth++;
+        Tcl_MutexUnlock(&gr->connLock);
+        return 1;
+    }
+
+    if (timeoutMs >= 0)
+    {
+        Tcl_Time deadline;
+        GlobalConn_DeadlineFromNow(&deadline, timeoutMs);
+        while (gr->opDepth > 0)
+        {
+            Tcl_ConditionWait(&gr->connCond, &gr->connLock, &deadline);
+            if (gr->opDepth == 0)
+                break;
+            Tcl_Time now;
+            Tcl_GetTime(&now);
+            if (now.sec > deadline.sec || (now.sec == deadline.sec && now.usec >= deadline.usec))
+            {
+                Tcl_MutexUnlock(&gr->connLock);
+                return 0;
+            }
+        }
+    }
+    else
+    {
+        while (gr->opDepth > 0)
+            Tcl_ConditionWait(&gr->connCond, &gr->connLock, NULL);
+    }
+
+    gr->opOwner = self;
+    gr->opDepth = 1;
+    Tcl_MutexUnlock(&gr->connLock);
+    return 1;
+}
+
+void Oradpi_SharedConnGateEnter(GlobalConnRec* gr)
+{
+    (void)Oradpi_SharedConnGateEnterTimed(gr, -1);
+}
+
+void Oradpi_SharedConnGateLeave(GlobalConnRec* gr)
+{
+    if (!gr)
+        return;
+
+    Tcl_MutexLock(&gr->connLock);
+    if (gr->opDepth > 0 && gr->opOwner == Tcl_GetCurrentThread())
+    {
+        gr->opDepth--;
+        if (gr->opDepth == 0)
+        {
+            gr->opOwner = (Tcl_ThreadId)0;
+            Tcl_ConditionNotify(&gr->connCond);
+        }
+    }
+    Tcl_MutexUnlock(&gr->connLock);
+}
+
+void Oradpi_SharedConnBreak(GlobalConnRec* gr, dpiConn* conn)
+{
+    if (!gr || !conn)
+        return;
+    Tcl_MutexLock(&gr->connLock);
+    Tcl_MutexUnlock(&gr->connLock);
+    (void)dpiConn_breakExecution(conn);
+}
+
+void Oradpi_ConnGateEnter(OradpiConn* co)
+{
+    if (co)
+        Oradpi_SharedConnGateEnter(co->shared);
+}
+
+int Oradpi_ConnGateEnterTimed(OradpiConn* co, int timeoutMs)
+{
+    return co ? Oradpi_SharedConnGateEnterTimed(co->shared, timeoutMs) : 1;
+}
+
+void Oradpi_ConnGateLeave(OradpiConn* co)
+{
+    if (co)
+        Oradpi_SharedConnGateLeave(co->shared);
+}
+
+void Oradpi_ConnBreak(OradpiConn* co)
+{
+    if (co)
+        Oradpi_SharedConnBreak(co->shared, co->conn);
+}
+
+void* Oradpi_ConnGateToken(OradpiConn* co)
+{
+    return co ? (void*)co->shared : NULL;
 }
 
 static void Oradpi_RegisterConnInInterp(OradpiInterpState* st, OradpiConn* co)
@@ -190,7 +358,7 @@ static void Oradpi_RegisterConnInInterp(OradpiInterpState* st, OradpiConn* co)
     const char* hname = Tcl_GetString(co->base.name);
     Tcl_HashEntry* e = Tcl_CreateHashEntry(&st->conns, hname, &newEntry);
     Tcl_SetHashValue(e, co);
-    GlobalConn_Publish(hname, co->conn);
+    co->shared = GlobalConn_PublishAndRef(hname, co->conn);
 }
 
 /* ---- Centralized OradpiMsg cleanup ---- */
@@ -222,10 +390,12 @@ void Oradpi_FreeMsg(OradpiMsg* m)
 
 void Oradpi_FreeConn(OradpiConn* co)
 {
+    GlobalConnRec* shared;
+
     if (!co)
         return;
 
-    const char* hname = (co->base.name ? Tcl_GetString(co->base.name) : NULL);
+    shared = co->shared;
 
     if (co->foTimerScheduled && co->foTimer)
     {
@@ -248,9 +418,10 @@ void Oradpi_FreeConn(OradpiConn* co)
     {
         if (co->ownerClose)
         {
-            if (hname)
-                GlobalConn_MarkOwnerGone(hname); /* block further adoptions */
+            GlobalConn_MarkOwnerGone(shared); /* block further adoptions */
+            Oradpi_SharedConnGateEnter(shared);
             dpiConn_close(co->conn, DPI_MODE_CONN_CLOSE_DEFAULT, NULL, 0);
+            Oradpi_SharedConnGateLeave(shared);
         }
         dpiConn_release(co->conn);
         co->conn = NULL;
@@ -262,12 +433,6 @@ void Oradpi_FreeConn(OradpiConn* co)
         co->pool = NULL;
     }
 
-    if (co->ownerClose && hname)
-    {
-        GlobalConn_Erase(hname);
-    }
-
-    /* Free base.name AFTER GlobalConn_Erase since hname points into it (fix 2.5) */
     if (co->base.name)
     {
         Tcl_DecrRefCount(co->base.name);
@@ -281,6 +446,8 @@ void Oradpi_FreeConn(OradpiConn* co)
         co->cachedEncoding = NULL;
     }
 
+    co->shared = NULL;
+    Oradpi_SharedConnRelease(shared);
     Tcl_Free((char*)co);
 }
 
@@ -296,8 +463,12 @@ void Oradpi_FreeStmt(Tcl_Interp* ip, OradpiStmt* s)
          * On timeout, we proceed with cleanup; the worker's own addRef'd
          * handles will be released when it eventually returns. */
         (void)Oradpi_StmtWaitForAsync(s, 1 /*cancel*/, 30000 /*30s timeout*/);
+        if (s->owner)
+            CONN_GATE_ENTER(s->owner);
         dpiStmt_close(s->stmt, NULL, 0);
         dpiStmt_release(s->stmt);
+        if (s->owner)
+            CONN_GATE_LEAVE(s->owner);
         s->stmt = NULL;
     }
     s->owner = NULL;
@@ -446,7 +617,7 @@ OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool)
     return co;
 }
 
-static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, dpiConn* connFromOwner)
+static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, GlobalConnRec* shared, dpiConn* connFromOwner)
 {
     OradpiInterpState* st = Oradpi_Get(ip);
     OradpiConn* co = (OradpiConn*)Tcl_Alloc(sizeof(*co));
@@ -454,9 +625,10 @@ static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, dpiC
 
     co->base.name = Tcl_NewStringObj(handleName, -1);
     Tcl_IncrRefCount(co->base.name);
-    /* Note: GlobalConn_Lookup already called dpiConn_addRef under lock (fix 5.2),
-     * so we just take ownership of that reference here. */
+    /* GlobalConn_LookupForAdoptAndRef already performed dpiConn_addRef() and
+     * incremented the shared record refcount under gConnMapMutex. */
     co->conn = connFromOwner;
+    co->shared = shared;
     co->pool = NULL;
     co->autocommit = 0;
     co->fetchArraySize = DPI_DEFAULT_FETCH_ARRAY_SIZE;
@@ -466,11 +638,13 @@ static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, dpiC
     co->inlineLobs = 0;
     co->stmtCacheSize = 0;
     co->ownerClose = 0;
+    co->adopted = 1;
     co->cachedEncoding = NULL;
     if (co->conn)
     {
         dpiEncodingInfo enc;
         memset(&enc, 0, sizeof enc);
+        CONN_GATE_ENTER(co);
         if (dpiConn_getEncodingInfo(co->conn, &enc) == DPI_SUCCESS && enc.encoding)
         {
             Tcl_Size elen = (Tcl_Size)strlen(enc.encoding);
@@ -481,6 +655,7 @@ static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, dpiC
                 memcpy(co->cachedEncoding, enc.encoding, encBytes);
             }
         }
+        CONN_GATE_LEAVE(co);
     }
 
     int newEntry;
@@ -507,11 +682,10 @@ OradpiConn* Oradpi_LookupConn(Tcl_Interp* ip, Tcl_Obj* nameObj)
     }
 
     int ownerAlive = 0;
-    dpiConn* shared = GlobalConn_Lookup(hname, &ownerAlive);
-    if (shared && ownerAlive)
-    {
-        return Oradpi_AdoptConn(ip, hname, shared);
-    }
+    dpiConn* sharedConn = NULL;
+    GlobalConnRec* shared = GlobalConn_LookupForAdoptAndRef(hname, &sharedConn, &ownerAlive);
+    if (shared && ownerAlive && sharedConn)
+        return Oradpi_AdoptConn(ip, hname, shared, sharedConn);
 
     return NULL;
 }

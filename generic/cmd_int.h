@@ -43,8 +43,13 @@
  *                        Leaf lock.
  *   8. gTypeInitMutex   (cmd_bind.c)    — protects gBytearrayType one-time init.
  *                        Leaf lock.
+ *   9. GlobalConnRec.connLock (state.c) — shared per-dpiConn operation gate.
+ *                        Serializes ODPI/OCI calls across owner, adopters,
+ *                        and async workers for the same dpiConn*.
+ *                        Leaf lock; never hold while acquiring gAsyncMutex
+ *                        or gConnMapMutex.
  *
- * Leaf locks (4-8) are independent and may be acquired in any order
+ * Leaf locks (4-9) are independent and may be acquired in any order
  * relative to each other, but never while holding a non-leaf lock (1-3)
  * if the non-leaf lock's critical section could call into those modules.
  *
@@ -109,6 +114,9 @@ int Oradpi_CaptureODPIError(dpiErrorInfo* ei);
 
 #define ORATCL_NAMESPACE "::oratcl"
 
+#define ORATCL_VERSION "9.0"
+#define ORATCL_TCL_MIN "9"
+
 #define ORADPI_FO_CLASS_NETWORK 0x01u
 #define ORADPI_FO_CLASS_CONNLOST 0x02u
 
@@ -157,6 +165,32 @@ static inline int Oradpi_CheckedU64ToSizeT(Tcl_Interp* ip, uint64_t len, size_t*
     return TCL_OK;
 }
 
+static inline int Oradpi_CheckedWideIntToU32(Tcl_Interp* ip, Tcl_WideInt value, uint32_t* out, const char* what)
+{
+    if (value < 0)
+    {
+        if (ip)
+            Tcl_SetObjResult(ip, Tcl_ObjPrintf("%s must be >= 0", what ? what : "value"));
+        return TCL_ERROR;
+    }
+    if ((uint64_t)value > UINT32_MAX)
+    {
+        if (ip)
+            Tcl_SetObjResult(ip, Tcl_ObjPrintf("%s exceeds uint32 range", what ? what : "value"));
+        return TCL_ERROR;
+    }
+    *out = (uint32_t)value;
+    return TCL_OK;
+}
+
+static inline int Oradpi_GetUInt32FromObj(Tcl_Interp* ip, Tcl_Obj* obj, uint32_t* out, const char* what)
+{
+    Tcl_WideInt value = 0;
+    if (Tcl_GetWideIntFromObj(ip, obj, &value) != TCL_OK)
+        return TCL_ERROR;
+    return Oradpi_CheckedWideIntToU32(ip, value, out, what);
+}
+
 static inline int Oradpi_CheckedAllocBytes(Tcl_Interp* ip, Tcl_Size count, size_t elemSize, size_t* out, const char* what)
 {
     size_t countSize = 0;
@@ -171,6 +205,21 @@ static inline int Oradpi_CheckedAllocBytes(Tcl_Interp* ip, Tcl_Size count, size_
     *out = countSize * elemSize;
     return TCL_OK;
 }
+
+#define CONN_GATE_ENTER(co) Oradpi_ConnGateEnter((co))
+#define CONN_GATE_ENTER_TIMED(co, timeoutMs) Oradpi_ConnGateEnterTimed((co), (timeoutMs))
+#define CONN_GATE_LEAVE(co) Oradpi_ConnGateLeave((co))
+#define CONN_BREAK(co) Oradpi_ConnBreak((co))
+
+/* V-6 fix: centralized checked list-append macro.  Every call to
+ * Tcl_ListObjAppendElement() must inspect its return code.  Duplicated
+ * from cmd_msg.c so all translation units can use it. */
+#define LAPPEND_CHK(ip, list, obj)                                                                                               \
+    do                                                                                                                           \
+    {                                                                                                                            \
+        if (Tcl_ListObjAppendElement((ip), (list), (obj)) != TCL_OK)                                                             \
+            return TCL_ERROR;                                                                                                    \
+    } while (0)
 
 /* State ops */
 OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool);
@@ -209,6 +258,6 @@ void Oradpi_ClearBindStoreForStmt(Tcl_Interp* ip, const char* stmtKey);
 int Oradpi_BindOneByValue(Tcl_Interp* ip, OradpiStmt* s, OradpiPendingRefs* pr, const char* nameNoColon, Tcl_Obj* valueObj);
 int Oradpi_RebindAllStored(Tcl_Interp* ip, OradpiStmt* s, OradpiPendingRefs* pr, const char* stmtKey);
 uint32_t Oradpi_WithColon(const char* nameNoColon, char* dst, uint32_t cap);
-const char* Oradpi_StripColon(const char* raw, uint32_t* nlenOut);
+const char* Oradpi_StripColon(const char* raw);
 
 #endif /* ORATCL_ODPI_CMD_INT_H */

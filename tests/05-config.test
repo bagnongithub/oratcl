@@ -33,3 +33,27 @@ test 05-1.2 {statement fetchrows/prefetchrows} -constraints {have_connect} -body
         list [oraconfig $S fetchrows] [oraconfig $S prefetchrows]
     }
 } -result {50 20}
+
+
+test 05-1.3 {fetchrows rejects zero} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        set rc [catch {oraconfig $S fetchrows 0} msg]
+        catch {oraclose $S}
+        list $rc [string match "*must be >= 1*" $msg]
+    }
+} -result {1 1}
+
+test 05-1.4 {calltimeout rejects uint32 overflow} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set rc [catch {oraconfig $L calltimeout 4294967296} msg]
+        list $rc [string match "*exceeds uint32 range*" $msg]
+    }
+} -result {1 1}
+
+test 05-1.5 {foErrorClasses rejects unknown values} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set rc [catch {oraconfig $L foErrorClasses {network mystery}} msg]
+        list $rc [string match "*unknown foErrorClasses value*" $msg]
+    }
+} -result {1 1}

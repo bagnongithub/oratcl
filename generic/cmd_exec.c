@@ -72,11 +72,14 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
     }
 
     dpiStmtInfo info;
+    CONN_GATE_ENTER(s->owner);
     if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS)
     {
+        CONN_GATE_LEAVE(s->owner);
         Oradpi_PendingsFree(&pr);
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_getInfo");
     }
+    CONN_GATE_LEAVE(s->owner);
 
     dpiExecMode mode = DPI_MODE_EXEC_DEFAULT;
     if (doCommit || (s->owner && s->owner->autocommit && (info.isDML || info.isPLSQL)))
@@ -102,9 +105,21 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
     for (uint32_t attempt = 0; attempt < totalTries; attempt++)
     {
         nqc = 0;
+        CONN_GATE_ENTER(s->owner);
         execRc = dpiStmt_execute(s->stmt, mode, &nqc);
         if (execRc == DPI_SUCCESS)
-            break;
+        {
+            uint64_t rows = 0;
+            if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
+                Oradpi_RecordRows((OradpiBase*)s, rows);
+            Oradpi_UpdateStmtType(s);
+            CONN_GATE_LEAVE(s->owner);
+            Oradpi_PendingsFree(&pr);
+            Oradpi_PendingsForget(ip, skey);
+            Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
+            return TCL_OK;
+        }
+        CONN_GATE_LEAVE(s->owner);
 
         /* Capture error immediately (thread-local, must be before next ODPI call) */
         memset(&lastEi, 0, sizeof(lastEi));
@@ -134,16 +149,8 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
         return Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase*)s, "dpiStmt_execute", &lastEi);
     }
 
-    uint64_t rows = 0;
-    if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
-        Oradpi_RecordRows((OradpiBase*)s, rows);
-    Oradpi_UpdateStmtType(s);
-
     Oradpi_PendingsFree(&pr);
-    Oradpi_PendingsForget(ip, skey);
-
-    Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
-    return TCL_OK;
+    return TCL_OK; /* success returns from inside the execute loop */
 }
 
 /*
@@ -222,8 +229,12 @@ int Oradpi_Cmd_StmtSql(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const o
     if (slen < 0 || (uint64_t)slen > UINT32_MAX)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "SQL text exceeds maximum length");
     dpiStmt* newStmt = NULL;
+    CONN_GATE_ENTER(s->owner);
     if (dpiConn_prepareStmt(s->owner->conn, 0, sql, (uint32_t)slen, NULL, 0, &newStmt) != DPI_SUCCESS)
+    {
+        CONN_GATE_LEAVE(s->owner);
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s->owner, "dpiConn_prepareStmt");
+    }
 
     if (s->stmt)
     {
@@ -231,6 +242,7 @@ int Oradpi_Cmd_StmtSql(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const o
         dpiStmt_release(s->stmt);
     }
     s->stmt = newStmt;
+    CONN_GATE_LEAVE(s->owner);
 
     const char* skey = Tcl_GetString(objv[1]);
     Oradpi_ClearBindStoreForStmt(ip, skey);
@@ -291,14 +303,19 @@ int Oradpi_Cmd_Plexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
         if (bl < 0 || (uint64_t)bl > UINT32_MAX)
             return Oradpi_SetError(ip, (OradpiBase*)s, -1, "PL/SQL text exceeds maximum length");
         dpiStmt* newStmt = NULL;
+        CONN_GATE_ENTER(s->owner);
         if (dpiConn_prepareStmt(s->owner->conn, 0, sql, (uint32_t)bl, NULL, 0, &newStmt) != DPI_SUCCESS)
+        {
+            CONN_GATE_LEAVE(s->owner);
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s->owner, "dpiConn_prepareStmt");
+        }
         if (s->stmt)
         {
             dpiStmt_close(s->stmt, NULL, 0);
             dpiStmt_release(s->stmt);
         }
         s->stmt = newStmt;
+        CONN_GATE_LEAVE(s->owner);
         Oradpi_ClearBindStoreForStmt(ip, Tcl_GetString(objv[1]));
     }
 

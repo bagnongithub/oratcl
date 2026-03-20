@@ -52,6 +52,7 @@ typedef struct OradpiAsyncEntry
     dpiConn* conn;
     dpiStmt* stmt;
     OradpiConn* owner;
+    GlobalConnRec* shared;
 
     int doCommit;
     int autocommit;
@@ -205,6 +206,8 @@ static void AsyncFreeEntry(OradpiAsyncEntry* ae)
         dpiStmt_release(ae->stmt);
     if (ae->conn)
         dpiConn_release(ae->conn);
+    if (ae->shared)
+        Oradpi_SharedConnRelease(ae->shared);
     if (ae->stmtKey)
         Tcl_Free(ae->stmtKey);
     Tcl_ConditionFinalize(&ae->cond);
@@ -297,10 +300,16 @@ static void PoolEnsure(void)
         Tcl_MutexUnlock(&gPoolInitMutex);
         return;
     }
+    size_t threadBytes = 0;
     memset(&gPool, 0, sizeof(gPool));
     gPool.nThreads = ORADPI_DEFAULT_POOL_SIZE;
-    gPool.threads = (Tcl_ThreadId*)Tcl_Alloc(sizeof(Tcl_ThreadId) * (size_t)gPool.nThreads);
-    memset(gPool.threads, 0, sizeof(Tcl_ThreadId) * (size_t)gPool.nThreads);
+    if (Oradpi_CheckedAllocBytes(NULL, gPool.nThreads, sizeof(Tcl_ThreadId), &threadBytes, "worker thread table") != TCL_OK)
+    {
+        Tcl_MutexUnlock(&gPoolInitMutex);
+        return;
+    }
+    gPool.threads = (Tcl_ThreadId*)Tcl_Alloc(threadBytes);
+    memset(gPool.threads, 0, threadBytes);
 
     for (Tcl_Size i = 0; i < gPool.nThreads; i++)
     {
@@ -395,7 +404,7 @@ static void PoolExitHandler(void* unused)
                     ae->canceled = 1;
                     dpiConn* localConn = ae->conn;
                     Tcl_MutexUnlock(&ae->lock);
-                    (void)dpiConn_breakExecution(localConn);
+                    Oradpi_SharedConnBreak(ae->shared, localConn);
                 }
                 else
                 {
@@ -412,16 +421,18 @@ static void PoolExitHandler(void* unused)
         Tcl_ConditionNotify(&gPool.queueCond);
     Tcl_MutexUnlock(&gPool.queueMutex);
 
+    int allJoined = 1;
     for (Tcl_Size i = 0; i < nThreads; i++)
     {
         if (gPool.threads[i])
         {
-            /* m-5: Silently ignore join failures — during process exit,
-             * threads may have already exited and fprintf(stderr) is
-             * inappropriate in extension code (channels may be torn down). */
-            (void)Tcl_JoinThread(gPool.threads[i], NULL);
+            if (Tcl_JoinThread(gPool.threads[i], NULL) != TCL_OK)
+                allJoined = 0;
         }
     }
+
+    if (!allJoined)
+        return;
 
     Tcl_MutexLock(&gPool.queueMutex);
     while (gPool.head)
@@ -500,11 +511,14 @@ static void AsyncWorkerBody(const char* key)
 
     dpiExecMode mode = DPI_MODE_EXEC_DEFAULT;
     dpiStmtInfo info;
+    memset(&info, 0, sizeof(info));
+    Oradpi_SharedConnGateEnter(ae->shared);
     if (dpiStmt_getInfo(stmt, &info) == DPI_SUCCESS)
     {
         if (doCommit || (autocommit && (info.isDML || info.isPLSQL)))
             mode |= DPI_MODE_EXEC_COMMIT_ON_SUCCESS;
     }
+    Oradpi_SharedConnGateLeave(ae->shared);
 
     /* Execute with retry/backoff if failover policy is configured (SUG-4).
      * maxAttempts/backoffMs/backoffFact/errClasses are already snapshotted above. */
@@ -532,7 +546,9 @@ static void AsyncWorkerBody(const char* key)
             break;
 
         nqc = 0;
+        Oradpi_SharedConnGateEnter(ae->shared);
         execRc = dpiStmt_execute(stmt, mode, &nqc);
+        Oradpi_SharedConnGateLeave(ae->shared);
         if (execRc == DPI_SUCCESS)
             break;
 
@@ -711,6 +727,8 @@ int Oradpi_Cmd_ExecAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_addRef");
     }
 
+    Oradpi_SharedConnAddRef(s->owner->shared);
+
     Tcl_MutexLock(&ae->lock);
     ae->owner = s->owner;
     ae->doCommit = commit;
@@ -735,6 +753,7 @@ int Oradpi_Cmd_ExecAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
     }
     ae->conn = s->owner->conn;
     ae->stmt = s->stmt;
+    ae->shared = s->owner->shared;
     ae->stmtKey = stmtKeyCopy;
     Tcl_MutexUnlock(&ae->lock);
 
@@ -787,7 +806,9 @@ int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
             Tcl_SetObjResult(ip, Tcl_NewStringObj("orawaitasync: -timeout must be >= 0 (or -1 for infinite)", -1));
             return TCL_ERROR;
         }
-        timeoutMs = (wTimeout > INT_MAX) ? INT_MAX : (int)wTimeout;
+        if (wTimeout > INT_MAX)
+            return Oradpi_SetError(ip, (OradpiBase*)s, -1, "orawaitasync: -timeout exceeds INT_MAX milliseconds");
+        timeoutMs = (int)wTimeout;
     }
 
     /* C-2 fix: use string key instead of raw pointer */
@@ -845,9 +866,11 @@ int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
     errCode = ae->errorCode;
     if (ae->errorMsg)
     {
+        /* V-6 fix: pass NULL interp to avoid calling Tcl_SetObjResult
+         * while holding ae->lock (deadlock hazard). */
         Tcl_Size msgLen = (Tcl_Size)strlen(ae->errorMsg);
         size_t msgBytes = 0;
-        if (Oradpi_CheckedAllocBytes(ip, msgLen + 1, sizeof(char), &msgBytes, "async wait error message") == TCL_OK)
+        if (Oradpi_CheckedAllocBytes(NULL, msgLen + 1, sizeof(char), &msgBytes, "async wait error message") == TCL_OK)
         {
             errMsg = (char*)Tcl_Alloc(msgBytes);
             memcpy(errMsg, ae->errorMsg, msgLen + 1);
@@ -873,7 +896,11 @@ int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
         else
             Oradpi_SetError(ip, (OradpiBase*)s, -1, "asynchronous execute failed");
     }
-    Tcl_SetObjResult(ip, Tcl_NewIntObj(rc));
+    /* V-6 fix: return the actual Oracle/ODPI error code on failure, not the
+     * worker's internal -1 sentinel.  This matches the documented contract:
+     * "Returns: 0 on success; -3123 on timeout; error code on exec failure." */
+    int resultCode = (rc != 0) ? (errCode ? errCode : -1) : 0;
+    Tcl_SetObjResult(ip, Tcl_NewIntObj(resultCode));
     return TCL_OK;
 }
 
@@ -894,7 +921,7 @@ int Oradpi_StmtWaitForAsync(OradpiStmt* s, int cancel, int timeoutMs)
         ae->canceled = 1;
         Tcl_MutexUnlock(&ae->lock);
         if (localConn)
-            (void)dpiConn_breakExecution(localConn);
+            Oradpi_SharedConnBreak(ae->shared, localConn);
     }
 
     Tcl_MutexLock(&ae->lock);
@@ -963,12 +990,22 @@ void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co)
         return;
 
     Tcl_Size cap = 4, count = 0;
+    size_t keysBytes = 0;
+    size_t keyNamesBytes = 0;
+    size_t entriesBytes = 0;
     /* C-2 fix: collect string keys instead of raw pointers.
      * V-1 fix: also collect refcounted ae pointers so we don't need
      * redundant lookups in the cancel/wait loop. */
-    char** keys = (char**)Tcl_Alloc(sizeof(char*) * (size_t)cap);
-    char** keyNames = (char**)Tcl_Alloc(sizeof(char*) * (size_t)cap);
-    OradpiAsyncEntry** entries = (OradpiAsyncEntry**)Tcl_Alloc(sizeof(OradpiAsyncEntry*) * (size_t)cap);
+    if (Oradpi_CheckedAllocBytes(NULL, cap, sizeof(char*), &keysBytes, "async cancel key table") != TCL_OK ||
+        Oradpi_CheckedAllocBytes(NULL, cap, sizeof(char*), &keyNamesBytes, "async cancel statement-key table") != TCL_OK ||
+        Oradpi_CheckedAllocBytes(NULL, cap, sizeof(OradpiAsyncEntry*), &entriesBytes, "async cancel entry table") != TCL_OK)
+        return;
+    char** keys = (char**)Tcl_Alloc(keysBytes);
+    char** keyNames = (char**)Tcl_Alloc(keyNamesBytes);
+    OradpiAsyncEntry** entries = (OradpiAsyncEntry**)Tcl_Alloc(entriesBytes);
+    memset(keys, 0, keysBytes);
+    memset(keyNames, 0, keyNamesBytes);
+    memset(entries, 0, entriesBytes);
 
     Tcl_MutexLock(&gAsyncMutex);
     if (!gAsyncInit)
@@ -998,16 +1035,36 @@ void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co)
 
         if (count == cap)
         {
-            cap *= 2;
-            keys = (char**)Tcl_Realloc((char*)keys, sizeof(char*) * (size_t)cap);
-            keyNames = (char**)Tcl_Realloc((char*)keyNames, sizeof(char*) * (size_t)cap);
-            entries = (OradpiAsyncEntry**)Tcl_Realloc((char*)entries, sizeof(OradpiAsyncEntry*) * (size_t)cap);
+            Tcl_Size newCap = 0;
+            size_t newKeysBytes = 0;
+            size_t newKeyNamesBytes = 0;
+            size_t newEntriesBytes = 0;
+            if (cap > TCL_SIZE_MAX / 2 ||
+                Oradpi_CheckedAllocBytes(NULL, (newCap = cap * 2), sizeof(char*), &newKeysBytes, "async cancel key table") !=
+                    TCL_OK ||
+                Oradpi_CheckedAllocBytes(NULL, newCap, sizeof(char*), &newKeyNamesBytes, "async cancel statement-key table") !=
+                    TCL_OK ||
+                Oradpi_CheckedAllocBytes(NULL, newCap, sizeof(OradpiAsyncEntry*), &newEntriesBytes, "async cancel entry table") !=
+                    TCL_OK)
+            {
+                Tcl_MutexUnlock(&ae->lock);
+                continue;
+            }
+            keys = (char**)Tcl_Realloc((char*)keys, newKeysBytes);
+            keyNames = (char**)Tcl_Realloc((char*)keyNames, newKeyNamesBytes);
+            entries = (OradpiAsyncEntry**)Tcl_Realloc((char*)entries, newEntriesBytes);
+            memset(keys + cap, 0, sizeof(char*) * (size_t)(newCap - cap));
+            memset(keyNames + cap, 0, sizeof(char*) * (size_t)(newCap - cap));
+            memset(entries + cap, 0, sizeof(OradpiAsyncEntry*) * (size_t)(newCap - cap));
+            cap = newCap;
         }
-        /* Copy the hash key string for use after releasing gAsyncMutex */
+        /* Copy the hash key string for use after releasing gAsyncMutex.
+         * V-6 fix: pass NULL interp to avoid calling Tcl_SetObjResult
+         * while holding gAsyncMutex + ae->lock (deadlock hazard). */
         const char* hashKey = Tcl_GetHashKey(&gAsyncByKey, e);
         Tcl_Size hkLen = (Tcl_Size)strlen(hashKey);
         size_t hkBytes = 0;
-        if (Oradpi_CheckedAllocBytes(ip, hkLen + 1, sizeof(char), &hkBytes, "async cancel key copy") != TCL_OK)
+        if (Oradpi_CheckedAllocBytes(NULL, hkLen + 1, sizeof(char), &hkBytes, "async cancel key copy") != TCL_OK)
         {
             keys[count] = NULL;
         }
@@ -1017,12 +1074,13 @@ void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co)
             memcpy(keys[count], hashKey, hkLen + 1);
         }
 
-        /* Copy stmtKey for PendingsForget (now safely under ae->lock) */
+        /* Copy stmtKey for PendingsForget (now safely under ae->lock).
+         * V-6 fix: pass NULL interp — same deadlock avoidance. */
         if (ae->stmtKey)
         {
             Tcl_Size keyLen = (Tcl_Size)strlen(ae->stmtKey);
             size_t keyBytes = 0;
-            if (Oradpi_CheckedAllocBytes(ip, keyLen + 1, sizeof(char), &keyBytes, "async statement key copy") != TCL_OK)
+            if (Oradpi_CheckedAllocBytes(NULL, keyLen + 1, sizeof(char), &keyBytes, "async statement key copy") != TCL_OK)
             {
                 keyNames[count] = NULL;
             }
@@ -1059,7 +1117,7 @@ void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co)
             ae->canceled = 1;
             Tcl_MutexUnlock(&ae->lock);
             if (localConn)
-                (void)dpiConn_breakExecution(localConn);
+                Oradpi_SharedConnBreak(ae->shared, localConn);
 
             /* Wait with finite timeout */
             Tcl_MutexLock(&ae->lock);

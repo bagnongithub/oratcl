@@ -39,3 +39,16 @@ test 20-1.1 {adopt same connection handle across interps} -constraints {have_con
         set rc
     }
 } -result 0
+
+
+test 20-1.2 {adopted connection shares the same gate identity across interps} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set gate1 [::oratcl::internal::connGateId $L]
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set gate2 [interp eval $child {::oratcl::internal::connGateId $L}]
+        interp delete $child
+        expr {$gate1 eq $gate2}
+    }
+} -result 1

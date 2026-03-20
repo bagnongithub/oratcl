@@ -81,23 +81,35 @@ static int CheckU32(Tcl_Interp* ip, Tcl_Size len, uint32_t* out)
 
 static const Tcl_ObjType* EnsureBytearrayType(void)
 {
-    const Tcl_ObjType* result;
+    /* V-6 fix: perform all Tcl API calls (Tcl_GetObjType, Tcl_NewByteArrayObj,
+     * etc.) OUTSIDE the mutex to avoid deadlock risk.  Only take the lock to
+     * read/write the cached pointer. */
+    const Tcl_ObjType* cached;
+    Tcl_MutexLock(&gTypeInitMutex);
+    cached = gBytearrayType;
+    Tcl_MutexUnlock(&gTypeInitMutex);
+
+    if (cached)
+        return cached;
+
+    /* Slow path: resolve the type outside the lock */
+    const Tcl_ObjType* resolved = Tcl_GetObjType("bytearray");
+    if (!resolved)
+    {
+        /* Fallback: force Tcl to register the type by creating a temp obj */
+        Tcl_Obj* tmp = Tcl_NewByteArrayObj(NULL, 0);
+        Tcl_IncrRefCount(tmp);
+        resolved = Tcl_GetObjType("bytearray");
+        Tcl_DecrRefCount(tmp);
+    }
+
+    /* Publish result; if another thread raced us, the value is the same */
     Tcl_MutexLock(&gTypeInitMutex);
     if (!gBytearrayType)
-    {
-        gBytearrayType = Tcl_GetObjType("bytearray");
-        /* Fallback: force Tcl to register the type by creating a temp obj */
-        if (!gBytearrayType)
-        {
-            Tcl_Obj* tmp = Tcl_NewByteArrayObj(NULL, 0);
-            Tcl_IncrRefCount(tmp);
-            gBytearrayType = Tcl_GetObjType("bytearray");
-            Tcl_DecrRefCount(tmp);
-        }
-    }
-    result = gBytearrayType;
+        gBytearrayType = resolved;
+    cached = gBytearrayType;
     Tcl_MutexUnlock(&gTypeInitMutex);
-    return result;
+    return cached;
 }
 
 /* C-2 fix: Non-shimmering check for bytearray internal rep via public API.
@@ -146,16 +158,11 @@ uint32_t Oradpi_WithColon(const char* nameNoColon, char* dst, uint32_t cap)
     return (uint32_t)(n + 1);
 }
 
-const char* Oradpi_StripColon(const char* raw, uint32_t* nlenOut)
+const char* Oradpi_StripColon(const char* raw)
 {
     const char* p = raw ? raw : "";
     if (*p == ':')
         p++;
-    if (nlenOut)
-    {
-        size_t len = strlen(p);
-        *nlenOut = (len <= UINT32_MAX) ? (uint32_t)len : UINT32_MAX;
-    }
     return p;
 }
 
@@ -165,17 +172,28 @@ static int BindVarByNameDual(OradpiStmt* s, const char* nameNoColon, dpiVar* var
 {
     char buf[256];
     uint32_t m = Oradpi_WithColon(nameNoColon, buf, (uint32_t)sizeof(buf));
+    CONN_GATE_ENTER(s->owner);
     if (m && dpiStmt_bindByName(s->stmt, buf, m, var) == DPI_SUCCESS)
+    {
+        CONN_GATE_LEAVE(s->owner);
         return TCL_OK;
+    }
 
     /* M-4 fix: guard narrowing of bind name length */
     Tcl_Size rawLen = (Tcl_Size)strlen(nameNoColon);
     uint32_t nlen = 0;
     if (CheckU32(ip, rawLen, &nlen) != TCL_OK)
+    {
+        CONN_GATE_LEAVE(s->owner);
         return TCL_ERROR;
+    }
     if (dpiStmt_bindByName(s->stmt, nameNoColon, nlen, var) == DPI_SUCCESS)
+    {
+        CONN_GATE_LEAVE(s->owner);
         return TCL_OK;
+    }
 
+    CONN_GATE_LEAVE(s->owner);
     return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, ctx);
 }
 
@@ -184,17 +202,28 @@ BindValueByNameDual(OradpiStmt* s, const char* nameNoColon, dpiNativeTypeNum ntn
 {
     char buf[256];
     uint32_t m = Oradpi_WithColon(nameNoColon, buf, (uint32_t)sizeof(buf));
+    CONN_GATE_ENTER(s->owner);
     if (m && dpiStmt_bindValueByName(s->stmt, buf, m, ntn, d) == DPI_SUCCESS)
+    {
+        CONN_GATE_LEAVE(s->owner);
         return TCL_OK;
+    }
 
     /* M-4 fix: guard narrowing of bind name length */
     Tcl_Size rawLen = (Tcl_Size)strlen(nameNoColon);
     uint32_t nlen = 0;
     if (CheckU32(ip, rawLen, &nlen) != TCL_OK)
+    {
+        CONN_GATE_LEAVE(s->owner);
         return TCL_ERROR;
+    }
     if (dpiStmt_bindValueByName(s->stmt, nameNoColon, nlen, ntn, d) == DPI_SUCCESS)
+    {
+        CONN_GATE_LEAVE(s->owner);
         return TCL_OK;
+    }
 
+    CONN_GATE_LEAVE(s->owner);
     return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, ctx);
 }
 
@@ -376,10 +405,17 @@ static OradpiPendingRefs* GetPendings(Tcl_Interp* ip, const char* stmtKey)
     OradpiPendingRefs* pr = isNew ? NULL : (OradpiPendingRefs*)Tcl_GetHashValue(he);
     if (!pr)
     {
+        size_t varBytes = 0;
         pr = (OradpiPendingRefs*)Tcl_Alloc(sizeof(*pr));
         pr->n = 0;
         pr->cap = 4;
-        pr->vars = (dpiVar**)Tcl_Alloc(sizeof(dpiVar*) * pr->cap);
+        if (Oradpi_CheckedAllocBytes(NULL, pr->cap, sizeof(dpiVar*), &varBytes, "pending var table") != TCL_OK)
+        {
+            pr->vars = NULL;
+            pr->cap = 0;
+        }
+        else
+            pr->vars = (dpiVar**)Tcl_Alloc(varBytes);
         Tcl_SetHashValue(he, pr);
     }
     return pr;
@@ -388,17 +424,34 @@ static OradpiPendingRefs* GetPendings(Tcl_Interp* ip, const char* stmtKey)
 /* Public PendingRefs management for stack-local use (cmd_exec.c) */
 void Oradpi_PendingsInit(OradpiPendingRefs* pr)
 {
+    size_t varBytes = 0;
     pr->n = 0;
     pr->cap = 8;
-    pr->vars = (dpiVar**)Tcl_Alloc(sizeof(dpiVar*) * pr->cap);
+    if (Oradpi_CheckedAllocBytes(NULL, pr->cap, sizeof(dpiVar*), &varBytes, "pending var table") != TCL_OK)
+    {
+        pr->vars = NULL;
+        pr->cap = 0;
+        return;
+    }
+    pr->vars = (dpiVar**)Tcl_Alloc(varBytes);
 }
 
 void Oradpi_PendingsAdd(OradpiPendingRefs* pr, dpiVar* v)
 {
+    if (!pr || !pr->vars || pr->cap <= 0)
+        return;
     if (pr->n == pr->cap)
     {
-        pr->cap *= 2;
-        pr->vars = (dpiVar**)Tcl_Realloc((char*)pr->vars, sizeof(dpiVar*) * pr->cap);
+        Tcl_Size newCap = 0;
+        size_t varBytes = 0;
+        if (pr->cap > TCL_SIZE_MAX / 2)
+            return;
+        newCap = pr->cap * 2;
+        if (Oradpi_CheckedAllocBytes(NULL, newCap, sizeof(dpiVar*), &varBytes, "pending var table") != TCL_OK)
+            return;
+        pr->vars = (dpiVar**)Tcl_Realloc((char*)pr->vars, varBytes);
+        memset(pr->vars + pr->cap, 0, sizeof(dpiVar*) * (size_t)(newCap - pr->cap));
+        pr->cap = newCap;
     }
     pr->vars[pr->n++] = v;
 }
@@ -455,12 +508,18 @@ static int BindOneLobScalar(Tcl_Interp* ip,
 {
     dpiVar* var = NULL;
     dpiData* data = NULL;
-    if (dpiConn_newVar(s->owner->conn, lobType, DPI_NATIVE_TYPE_LOB, 1, 0, 0, 0, NULL, &var, &data) != DPI_SUCCESS)
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiConn_newVar(LOB)");
-
     dpiLob* lob = NULL;
+
+    CONN_GATE_ENTER(s->owner);
+    if (dpiConn_newVar(s->owner->conn, lobType, DPI_NATIVE_TYPE_LOB, 1, 0, 0, 0, NULL, &var, &data) != DPI_SUCCESS)
+    {
+        CONN_GATE_LEAVE(s->owner);
+        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiConn_newVar(LOB)");
+    }
+
     if (dpiConn_newTempLob(s->owner->conn, lobType, &lob) != DPI_SUCCESS)
     {
+        CONN_GATE_LEAVE(s->owner);
         dpiVar_release(var);
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiConn_newTempLob");
     }
@@ -468,6 +527,7 @@ static int BindOneLobScalar(Tcl_Interp* ip,
     {
         if (dpiLob_setFromBytes(lob, buf, (uint64_t)buflen) != DPI_SUCCESS)
         {
+            CONN_GATE_LEAVE(s->owner);
             dpiLob_release(lob);
             dpiVar_release(var);
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiLob_setFromBytes");
@@ -475,11 +535,13 @@ static int BindOneLobScalar(Tcl_Interp* ip,
     }
     if (dpiVar_setFromLob(var, 0, lob) != DPI_SUCCESS)
     {
+        CONN_GATE_LEAVE(s->owner);
         dpiLob_release(lob);
         dpiVar_release(var);
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiVar_setFromLob");
     }
     dpiLob_release(lob);
+    CONN_GATE_LEAVE(s->owner);
 
     if (BindVarByNameDual(s, nameNoColon, var, ip, "dpiStmt_bindByName(LOB)") != TCL_OK)
     {
@@ -487,7 +549,6 @@ static int BindOneLobScalar(Tcl_Interp* ip,
         return TCL_ERROR;
     }
 
-    /* Use the passed pending refs (caller decides lifetime) */
     Oradpi_PendingsAdd(pr, var);
     return TCL_OK;
 }
@@ -577,7 +638,9 @@ int Oradpi_BindOneByValue(Tcl_Interp* ip, OradpiStmt* s, OradpiPendingRefs* pr, 
     if (!enc.encoding)
     {
         /* Fallback if cache not populated (e.g., adopted connection) */
+        CONN_GATE_ENTER(s->owner);
         (void)dpiConn_getEncodingInfo(s->owner->conn, &enc);
+        CONN_GATE_LEAVE(s->owner);
     }
     uint32_t sl32 = 0;
     if (CheckU32(ip, sl, &sl32) != TCL_OK)
@@ -653,7 +716,7 @@ int Oradpi_Cmd_Orabind(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const o
     int saw = 0;
     while (i + 1 < objc && Tcl_GetString(objv[i])[0] == ':')
     {
-        const char* nameNoColon = Oradpi_StripColon(Tcl_GetString(objv[i]), NULL);
+        const char* nameNoColon = Oradpi_StripColon(Tcl_GetString(objv[i]));
         Tcl_Obj* val = objv[i + 1];
 
         if (Oradpi_BindOneByValue(ip, s, pr, nameNoColon, val) != TCL_OK)
@@ -764,8 +827,11 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
     if (arrayDml)
     {
         /* S-2: FreeArrSpecs helper (defined above) replaces 6+ inline cleanup blocks */
-        ArrSpec* specs = (ArrSpec*)Tcl_Alloc(sizeof(ArrSpec) * 8);
+        size_t specsBytes = 0;
         Tcl_Size cap = 8, nSpecs = 0;
+        if (Oradpi_CheckedAllocBytes(ip, cap, sizeof(ArrSpec), &specsBytes, "array DML spec table") != TCL_OK)
+            return TCL_ERROR;
+        ArrSpec* specs = (ArrSpec*)Tcl_Alloc(specsBytes);
         Tcl_Size expected = -1;
 
         Tcl_Size j = i;
@@ -773,13 +839,26 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
         {
             if (nSpecs == cap)
             {
-                cap *= 2;
-                specs = (ArrSpec*)Tcl_Realloc((char*)specs, sizeof(ArrSpec) * (size_t)cap);
+                Tcl_Size newCap = 0;
+                size_t specsBytes = 0;
+                if (cap > TCL_SIZE_MAX / 2)
+                {
+                    FreeArrSpecs(specs, nSpecs, 0);
+                    return Oradpi_SetError(ip, (OradpiBase*)s, -1, "array DML spec table is too large");
+                }
+                newCap = cap * 2;
+                if (Oradpi_CheckedAllocBytes(ip, newCap, sizeof(ArrSpec), &specsBytes, "array DML spec table") != TCL_OK)
+                {
+                    FreeArrSpecs(specs, nSpecs, 0);
+                    return TCL_ERROR;
+                }
+                specs = (ArrSpec*)Tcl_Realloc((char*)specs, specsBytes);
+                cap = newCap;
             }
             ArrSpec* as = &specs[nSpecs];
             memset(as, 0, sizeof(*as));
 
-            as->nameNoColon = Oradpi_StripColon(Tcl_GetString(objv[j]), NULL);
+            as->nameNoColon = Oradpi_StripColon(Tcl_GetString(objv[j]));
             as->listObj = objv[j + 1];
             Tcl_IncrRefCount(as->listObj);
 
@@ -865,12 +944,17 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
         /* Use cached encoding (fix 4.2) */
         enc.encoding = s->owner->cachedEncoding;
         if (!enc.encoding)
+        {
+            CONN_GATE_ENTER(s->owner);
             (void)dpiConn_getEncodingInfo(s->owner->conn, &enc);
+            CONN_GATE_LEAVE(s->owner);
+        }
 
         for (Tcl_Size k = 0; k < nSpecs; k++)
         {
             ArrSpec* as = &specs[k];
 
+            CONN_GATE_ENTER(s->owner);
             if (dpiConn_newVar(s->owner->conn,
                                as->ora,
                                as->nat,
@@ -882,9 +966,11 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
                                &as->var,
                                &as->data) != DPI_SUCCESS)
             {
+                CONN_GATE_LEAVE(s->owner);
                 FreeArrSpecs(specs, nSpecs, iters);
                 return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiConn_newVar(array)");
             }
+            CONN_GATE_LEAVE(s->owner);
 
             if (as->nat == DPI_NATIVE_TYPE_BYTES)
             {
@@ -976,11 +1062,14 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
         }
 
         dpiStmtInfo info;
+        CONN_GATE_ENTER(s->owner);
         if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS)
         {
+            CONN_GATE_LEAVE(s->owner);
             FreeArrSpecs(specs, nSpecs, iters);
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_getInfo");
         }
+        CONN_GATE_LEAVE(s->owner);
 
         dpiExecMode mode = DPI_MODE_EXEC_DEFAULT;
         if (info.isDML)
@@ -988,8 +1077,10 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
         if (doCommit || (s->owner && s->owner->autocommit && (info.isDML || info.isPLSQL)))
             mode |= DPI_MODE_EXEC_COMMIT_ON_SUCCESS;
 
+        CONN_GATE_ENTER(s->owner);
         if (dpiStmt_executeMany(s->stmt, mode, iters) != DPI_SUCCESS)
         {
+            CONN_GATE_LEAVE(s->owner);
             FreeArrSpecs(specs, nSpecs, iters);
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_executeMany");
         }
@@ -997,6 +1088,7 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
         uint64_t rows = 0;
         if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
             Oradpi_RecordRows((OradpiBase*)s, rows);
+        CONN_GATE_LEAVE(s->owner);
 
         FreeArrSpecs(specs, nSpecs, iters);
 
@@ -1012,7 +1104,7 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
     Tcl_Size k = i;
     while (k + 1 < objc && Tcl_GetString(objv[k])[0] == ':')
     {
-        const char* nameNoColon = Oradpi_StripColon(Tcl_GetString(objv[k]), NULL);
+        const char* nameNoColon = Oradpi_StripColon(Tcl_GetString(objv[k]));
         Tcl_Obj* val = objv[k + 1];
 
         if (Oradpi_BindOneByValue(ip, s, pr, nameNoColon, val) != TCL_OK)
@@ -1026,19 +1118,24 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
     }
 
     dpiStmtInfo info;
+    CONN_GATE_ENTER(s->owner);
     if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS)
     {
+        CONN_GATE_LEAVE(s->owner);
         Oradpi_PendingsReleaseAll(pr);
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_getInfo");
     }
+    CONN_GATE_LEAVE(s->owner);
 
     dpiExecMode mode = DPI_MODE_EXEC_DEFAULT;
     if (doCommit || (s->owner && s->owner->autocommit && (info.isDML || info.isPLSQL)))
         mode |= DPI_MODE_EXEC_COMMIT_ON_SUCCESS;
 
     uint32_t nqc = 0;
+    CONN_GATE_ENTER(s->owner);
     if (dpiStmt_execute(s->stmt, mode, &nqc) != DPI_SUCCESS)
     {
+        CONN_GATE_LEAVE(s->owner);
         Oradpi_PendingsReleaseAll(pr);
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)s, "dpiStmt_execute");
     }
@@ -1046,6 +1143,7 @@ int Oradpi_Cmd_Orabindexec(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* con
     uint64_t rows = 0;
     if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
         Oradpi_RecordRows((OradpiBase*)s, rows);
+    CONN_GATE_LEAVE(s->owner);
     Oradpi_UpdateStmtType(s);
 
     Oradpi_PendingsReleaseAll(pr);

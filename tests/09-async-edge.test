@@ -1,0 +1,127 @@
+# -*-Tcl-*-
+# 07b-async-edge.test — Targeted async concurrency edge-case tests (V-11 fix)
+#
+# These tests validate the fixes for the verified findings:
+#   - V-3: orabind/orasql/oraplexec/orabindexec refuse when async busy
+#   - Close-during-async returns within a finite bound (no hang)
+#   - Basic orphan-cleanup path (timeout → orphan → worker self-cleans)
+#
+# NOTE: Tests requiring a live Oracle connection use the have_connect
+# constraint.  Tests that only exercise the Tcl-level error path of
+# the busy gate can run without a database if the handle exists.
+
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# =========================================================================
+# V-3 fix: Statement-mutating commands must refuse when async is in flight
+# =========================================================================
+
+test 07b-1.0 {orabind refuses when async busy} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "select /*+ materialize */ level from dual connect by level <= 100000"
+        oraexecasync $S
+        # The statement is now async-busy; orabind should return an error
+        set rc [catch {orabind $S :x 1} err]
+        # Clean up: wait for async to finish (or timeout)
+        catch {orawaitasync $S -timeout 5000}
+        oraclose $S
+        list $rc [string match "*busy*async*" $err]
+    }
+} -result {1 1}
+
+test 07b-1.1 {orasql refuses when async busy} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "select /*+ materialize */ level from dual connect by level <= 100000"
+        oraexecasync $S
+        set rc [catch {orasql $S "select 1 from dual"} err]
+        catch {orawaitasync $S -timeout 5000}
+        oraclose $S
+        list $rc [string match "*busy*async*" $err]
+    }
+} -result {1 1}
+
+test 07b-1.2 {oraplexec refuses when async busy} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "select /*+ materialize */ level from dual connect by level <= 100000"
+        oraexecasync $S
+        set rc [catch {oraplexec $S "begin null; end;"} err]
+        catch {orawaitasync $S -timeout 5000}
+        oraclose $S
+        list $rc [string match "*busy*async*" $err]
+    }
+} -result {1 1}
+
+test 07b-1.3 {orabindexec refuses when async busy} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "select /*+ materialize */ level from dual connect by level <= 100000"
+        oraexecasync $S
+        set rc [catch {orabindexec $S :x 1} err]
+        catch {orawaitasync $S -timeout 5000}
+        oraclose $S
+        list $rc [string match "*busy*async*" $err]
+    }
+} -result {1 1}
+
+# =========================================================================
+# Close-during-async: oraclose should complete within a finite bound
+# =========================================================================
+
+test 07b-2.0 {oraclose during async does not hang} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "select /*+ materialize */ level from dual connect by level <= 100000"
+        oraexecasync $S
+        # Close the statement while async is potentially running.
+        # This should cancel and join (with finite timeout), not hang.
+        set before [clock milliseconds]
+        oraclose $S
+        set elapsed [expr {[clock milliseconds] - $before}]
+        # Verify it didn't hang: should complete well within 60 seconds
+        # (teardown timeout is 30s; typical case is near-instant)
+        expr {$elapsed < 60000}
+    }
+} -result 1
+
+# =========================================================================
+# Orphan path: timeout in orawaitasync marks entry orphaned, no crash
+# =========================================================================
+
+test 07b-3.0 {orawaitasync timeout returns -3123 and does not crash} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        # Use a deliberately slow query
+        oraparse $S "select /*+ materialize */ level from dual connect by level <= 500000"
+        oraexecasync $S
+        # Very short timeout — almost guaranteed to time out
+        set rc [orawaitasync $S -timeout 1]
+        # If it timed out, rc should be -3123; if it completed fast, rc is 0
+        # Either is acceptable — the important thing is no crash.
+        oraclose $S
+        expr {$rc == 0 || $rc == -3123}
+    }
+} -result 1
+
+# =========================================================================
+# Multiple sequential async operations on same statement (no leak/crash)
+# =========================================================================
+
+test 07b-4.0 {sequential async ops on same handle do not leak} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "select 1 from dual"
+        set results {}
+        for {set i 0} {$i < 5} {incr i} {
+            oraexecasync $S
+            lappend results [orawaitasync $S -timeout 5000]
+        }
+        oraclose $S
+        # All should succeed (rc 0)
+        expr {[lsort -unique $results] eq "0"}
+    }
+} -result 1

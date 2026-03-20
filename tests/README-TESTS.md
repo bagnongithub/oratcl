@@ -25,9 +25,9 @@ The test runner uses numeric prefixes (`00-…`, `01-…`, …) to enforce order
 - **Conformance**: every public command is exercised (`oralogon`, `oraconfig`, `orainfo`, `oraopen`/`orastmt`,
   `oraclose`, `oraparse`, `orasql`, `orabind`, `orabindexec`, `oraexec`, `oraexecasync`, `orawaitasync`,
   `orafetch`, `oracols`, `oradesc`, `oramsg`, `oralob`, `oraautocommit`, `oracommit`, `orarollback`, `orabreak`).
-- **Multi-interp**: `20-multi-interp.test` creates child interpreters and verifies handle adoption is safe.
+- **Multi-interp**: `20-multi-interp.test` creates child interpreters, verifies handle adoption is safe, and checks that adopters share the same connection-serialization gate.
 - **Multi-thread**: `30-multi-thread.test` uses the `Thread` package to run queries in parallel.
-- **Multi-interp + Multi-thread**: `40-multi-both.test` combines both.
+- **Multi-interp + Multi-thread**: `40-multi-both.test` combines both, including cross-thread adopted-handle gate identity and a concurrent adopted-connection smoke test.
 - **Memory**: `90-memory.test` provides coarse checks under the `memory` constraint on posix systems.
 
 ## Notes
