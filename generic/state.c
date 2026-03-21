@@ -57,6 +57,20 @@ typedef struct GlobalConnRec
     Tcl_ThreadId opOwner; /* recursive ownership for same-thread reentry */
     unsigned int opDepth;
     char* nameKey; /* owned copy for hash removal / diagnostics */
+
+    /* V-8 fix: Behavioral policy snapshot.  Populated at publish time from
+     * the owner's wrapper, and updated by oraconfig.  Adopters copy these
+     * instead of using hardcoded defaults, ensuring the same dpiConn*
+     * behaves consistently across interps. */
+    int snap_autocommit;
+    uint32_t snap_fetchArraySize;
+    uint32_t snap_prefetchRows;
+    int snap_inlineLobs;
+    uint32_t snap_foMaxAttempts;
+    uint32_t snap_foBackoffMs;
+    double snap_foBackoffFactor;
+    uint32_t snap_foErrorClasses;
+    uint32_t snap_foDebounceMs;
 } GlobalConnRec;
 
 /* gConnMapMutex: protects gConnByName hash table and gConnMapInited flag.
@@ -73,8 +87,11 @@ static char* GlobalConn_DupName(const char* name)
     return copy;
 }
 
-/* M-3: Cleanup handler for process exit — frees all GlobalConnRec entries
- * and destroys the hash table to prevent leaks. */
+/* M-3 / V-8: Cleanup handler for process exit — frees GlobalConnRec entries
+ * whose refCount has reached 0.  Entries with outstanding references (e.g.
+ * from orphaned async workers still alive after teardown timeout) are
+ * intentionally skipped — their memory will be reclaimed by process exit.
+ * Freeing them while workers still hold pointers is use-after-free. */
 static void GlobalConnMap_ExitHandler(void* unused)
 {
     (void)unused;
@@ -88,6 +105,8 @@ static void GlobalConnMap_ExitHandler(void* unused)
             GlobalConnRec* gr = (GlobalConnRec*)Tcl_GetHashValue(he);
             if (gr)
             {
+                if (gr->refCount > 0)
+                    continue; /* V-8: still referenced — skip to avoid UaF */
                 Tcl_ConditionFinalize(&gr->connCond);
                 Tcl_MutexFinalize(&gr->connLock);
                 if (gr->nameKey)
@@ -352,6 +371,27 @@ void* Oradpi_ConnGateToken(OradpiConn* co)
     return co ? (void*)co->shared : NULL;
 }
 
+/* V-8 fix: Copy behavioral policy from an OradpiConn wrapper to its
+ * GlobalConnRec snapshot.  Called at publish time and after oraconfig
+ * changes, so that adopters in other interps inherit the owner's policy. */
+void Oradpi_SharedConnSyncBehavior(OradpiConn* co)
+{
+    if (!co || !co->shared)
+        return;
+    GlobalConnRec* gr = co->shared;
+    Tcl_MutexLock(&gConnMapMutex);
+    gr->snap_autocommit = co->autocommit;
+    gr->snap_fetchArraySize = co->fetchArraySize;
+    gr->snap_prefetchRows = co->prefetchRows;
+    gr->snap_inlineLobs = co->inlineLobs;
+    gr->snap_foMaxAttempts = co->foMaxAttempts;
+    gr->snap_foBackoffMs = co->foBackoffMs;
+    gr->snap_foBackoffFactor = co->foBackoffFactor;
+    gr->snap_foErrorClasses = co->foErrorClasses;
+    gr->snap_foDebounceMs = co->foDebounceMs;
+    Tcl_MutexUnlock(&gConnMapMutex);
+}
+
 static void Oradpi_RegisterConnInInterp(OradpiInterpState* st, OradpiConn* co)
 {
     int newEntry;
@@ -359,6 +399,9 @@ static void Oradpi_RegisterConnInInterp(OradpiInterpState* st, OradpiConn* co)
     Tcl_HashEntry* e = Tcl_CreateHashEntry(&st->conns, hname, &newEntry);
     Tcl_SetHashValue(e, co);
     co->shared = GlobalConn_PublishAndRef(hname, co->conn);
+    /* V-8 fix: Populate behavioral snapshot on the shared record so
+     * adopters inherit the owner's policy instead of defaults. */
+    Oradpi_SharedConnSyncBehavior(co);
 }
 
 /* ---- Centralized OradpiMsg cleanup ---- */
@@ -419,17 +462,27 @@ void Oradpi_FreeConn(OradpiConn* co)
         if (co->ownerClose)
         {
             GlobalConn_MarkOwnerGone(shared); /* block further adoptions */
-            /* Use timed gate to avoid infinite hang if a worker still holds
-             * the gate.  On timeout: skip dpiConn_close — the handle will
-             * be released below via dpiConn_release, and any stuck worker
-             * holds its own addRef'd handle. */
-            if (Oradpi_SharedConnGateEnterTimed(shared, ORADPI_TEARDOWN_TIMEOUT_MS))
+            /* Only close the server-side session if no adopters remain.
+             * dpiConn_close() terminates the session on the server, which
+             * would break any adopted handles in other interps that share
+             * the same dpiConn* via addRef.  When adopters are still active
+             * (refCount > 1 — the owner's own ref plus adopter refs), we
+             * skip the close and let the last dpiConn_release() handle
+             * cleanup automatically via ODPI-C reference counting. */
+            int hasAdopters = 0;
+            Tcl_MutexLock(&gConnMapMutex);
+            hasAdopters = (shared->refCount > 1);
+            Tcl_MutexUnlock(&gConnMapMutex);
+            if (!hasAdopters)
             {
-                dpiConn_close(co->conn, DPI_MODE_CONN_CLOSE_DEFAULT, NULL, 0);
-                Oradpi_SharedConnGateLeave(shared);
+                if (Oradpi_SharedConnGateEnterTimed(shared, ORADPI_TEARDOWN_TIMEOUT_MS))
+                {
+                    dpiConn_close(co->conn, DPI_MODE_CONN_CLOSE_DEFAULT, NULL, 0);
+                    Oradpi_SharedConnGateLeave(shared);
+                }
             }
-            /* else: timed gate failed — detach without close; worker will
-             * release its addRef'd handle when it eventually returns. */
+            /* else: adopters still active — skip close; or timed gate failed —
+             * detach without close; worker will release its addRef'd handle. */
         }
         dpiConn_release(co->conn);
         co->conn = NULL;
@@ -524,6 +577,23 @@ void Oradpi_RemoveStmt(Tcl_Interp* ip, OradpiStmt* s)
     Oradpi_FreeStmt(ip, s);
 }
 
+/* V-8 fix: Remove a LOB from interp state and free it.  Mirrors
+ * Oradpi_RemoveStmt() — needed for oralogoff LOB cleanup. */
+void Oradpi_RemoveLob(Tcl_Interp* ip, OradpiLob* l)
+{
+    if (!ip || !l)
+        return;
+    OradpiInterpState* st = (OradpiInterpState*)Tcl_GetAssocData(ip, "oradpi", NULL);
+    if (st && l->base.name)
+    {
+        const char* hname = Tcl_GetString(l->base.name);
+        Tcl_HashEntry* e = Tcl_FindHashEntry(&st->lobs, hname);
+        if (e)
+            Tcl_DeleteHashEntry(e);
+    }
+    Oradpi_FreeLob(l);
+}
+
 void Oradpi_FreeLob(OradpiLob* l)
 {
     if (!l)
@@ -531,10 +601,24 @@ void Oradpi_FreeLob(OradpiLob* l)
     GlobalConnRec* shared = l->shared;
     if (l->lob)
     {
-        Oradpi_SharedConnGateEnter(shared);
-        dpiLob_close(l->lob);
-        dpiLob_release(l->lob);
-        Oradpi_SharedConnGateLeave(shared);
+        /* V-8 fix: Use bounded timed gate instead of unconditional gate.
+         * Statement and connection teardown already use bounded waits to
+         * avoid hanging interp destruction.  LOB teardown was the only path
+         * that could block indefinitely.  On timeout, detach without closing —
+         * the stuck worker will eventually release its own addRef'd handle. */
+        if (shared && Oradpi_SharedConnGateEnterTimed(shared, ORADPI_TEARDOWN_TIMEOUT_MS))
+        {
+            dpiLob_close(l->lob);
+            dpiLob_release(l->lob);
+            Oradpi_SharedConnGateLeave(shared);
+        }
+        else if (!shared)
+        {
+            /* No shared gate (orphan LOB) — close ungated */
+            dpiLob_close(l->lob);
+            dpiLob_release(l->lob);
+        }
+        /* else: timed gate failed — detach; worker will release its handle */
         l->lob = NULL;
     }
     if (l->base.name)
@@ -611,7 +695,6 @@ OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool)
     co->autocommit = 0;
     co->fetchArraySize = DPI_DEFAULT_FETCH_ARRAY_SIZE;
     co->prefetchRows = DPI_DEFAULT_PREFETCH_ROWS;
-    co->prefetchMemory = 0;
     co->callTimeout = 0;
     co->inlineLobs = 0;
     co->stmtCacheSize = 0;
@@ -655,21 +738,38 @@ static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, Glob
     co->conn = connFromOwner;
     co->shared = shared;
     co->pool = NULL;
-    co->autocommit = 0;
-    co->fetchArraySize = DPI_DEFAULT_FETCH_ARRAY_SIZE;
-    co->prefetchRows = DPI_DEFAULT_PREFETCH_ROWS;
-    co->prefetchMemory = 0;
+
+    /* V-8 fix: Copy behavioral policy from the shared snapshot instead of
+     * using hardcoded defaults.  This ensures the same dpiConn* behaves
+     * consistently across interps.  The snapshot is populated by the owner
+     * at publish time and updated by oraconfig. */
+    Tcl_MutexLock(&gConnMapMutex);
+    co->autocommit = shared->snap_autocommit;
+    co->fetchArraySize = shared->snap_fetchArraySize;
+    co->prefetchRows = shared->snap_prefetchRows;
+    co->inlineLobs = shared->snap_inlineLobs;
+    co->foMaxAttempts = shared->snap_foMaxAttempts;
+    co->foBackoffMs = shared->snap_foBackoffMs;
+    co->foBackoffFactor = shared->snap_foBackoffFactor;
+    co->foErrorClasses = shared->snap_foErrorClasses;
+    co->foDebounceMs = shared->snap_foDebounceMs;
+    Tcl_MutexUnlock(&gConnMapMutex);
+
     co->callTimeout = 0;
-    co->inlineLobs = 0;
     co->stmtCacheSize = 0;
     co->ownerClose = 0;
     co->adopted = 1;
     co->cachedEncoding = NULL;
     if (co->conn)
     {
+        uint32_t v = 0;
+        CONN_GATE_ENTER(co);
+        if (dpiConn_getCallTimeout(co->conn, &v) == DPI_SUCCESS)
+            co->callTimeout = v;
+        if (dpiConn_getStmtCacheSize(co->conn, &v) == DPI_SUCCESS)
+            co->stmtCacheSize = v;
         dpiEncodingInfo enc;
         memset(&enc, 0, sizeof enc);
-        CONN_GATE_ENTER(co);
         if (dpiConn_getEncodingInfo(co->conn, &enc) == DPI_SUCCESS && enc.encoding)
         {
             Tcl_Size elen = (Tcl_Size)strlen(enc.encoding);
@@ -691,6 +791,8 @@ static OradpiConn* Oradpi_AdoptConn(Tcl_Interp* ip, const char* handleName, Glob
 
 OradpiConn* Oradpi_LookupConn(Tcl_Interp* ip, Tcl_Obj* nameObj)
 {
+    if (!ip || !nameObj)
+        return NULL;
     OradpiInterpState* st = Oradpi_Get(ip);
     const char* hname = Tcl_GetString(nameObj);
     Tcl_HashEntry* e = Tcl_FindHashEntry(&st->conns, hname);
@@ -723,6 +825,11 @@ OradpiStmt* Oradpi_NewStmt(Tcl_Interp* ip, OradpiConn* co)
     s->base.name = Oradpi_NewHandleName(ip, "oraS");
     Tcl_IncrRefCount(s->base.name);
     s->owner = co;
+    /* V-8 fix: Inherit connection-level fetchArraySize so that the
+     * parse-time dpiStmt_setFetchArraySize() call at cmd_stmt.c fires,
+     * and so the statement-level getter reports the effective value. */
+    if (co)
+        s->fetchArray = co->fetchArraySize;
     int newEntry;
     Tcl_HashEntry* e = Tcl_CreateHashEntry(&st->stmts, Tcl_GetString(s->base.name), &newEntry);
     Tcl_SetHashValue(e, s);
@@ -731,8 +838,13 @@ OradpiStmt* Oradpi_NewStmt(Tcl_Interp* ip, OradpiConn* co)
 
 OradpiStmt* Oradpi_LookupStmt(Tcl_Interp* ip, Tcl_Obj* nameObj)
 {
-    OradpiInterpState* st = Oradpi_Get(ip);
-    Tcl_HashEntry* e = Tcl_FindHashEntry(&st->stmts, Tcl_GetString(nameObj));
+    if (!ip || !nameObj)
+        return NULL;
+    OradpiInterpState* st = (OradpiInterpState*)Tcl_GetAssocData(ip, "oradpi", NULL);
+    if (!st)
+        return NULL;
+    const char* name = Tcl_GetString(nameObj);
+    Tcl_HashEntry* e = Tcl_FindHashEntry(&st->stmts, name);
     return e ? (OradpiStmt*)Tcl_GetHashValue(e) : NULL;
 }
 

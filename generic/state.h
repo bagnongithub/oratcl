@@ -78,7 +78,6 @@ typedef struct OradpiConn
     uint32_t stmtCacheSize;
     uint32_t fetchArraySize;
     uint32_t prefetchRows;
-    uint32_t prefetchMemory;
     uint32_t callTimeout;
     int inlineLobs;
 
@@ -158,6 +157,7 @@ void Oradpi_SharedConnGateEnter(GlobalConnRec* gr);
 int Oradpi_SharedConnGateEnterTimed(GlobalConnRec* gr, int timeoutMs);
 void Oradpi_SharedConnGateLeave(GlobalConnRec* gr);
 void Oradpi_SharedConnBreak(GlobalConnRec* gr, dpiConn* conn);
+void Oradpi_SharedConnSyncBehavior(OradpiConn* co);
 void* Oradpi_ConnGateToken(OradpiConn* co);
 
 #endif /* ORATCL_ODPI_STATE_H */

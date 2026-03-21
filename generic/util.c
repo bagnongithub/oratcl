@@ -155,9 +155,14 @@ static void Oradpi_FailoverTimerProc(void* clientData)
 
     Tcl_Interp* evalIp = co->ownerIp;
 
+    /* V-8 fix: use consistent checked-append pattern */
+    int appendOk = 1;
     if (Tcl_ListObjAppendElement(evalIp, cmd, co->base.name) != TCL_OK ||
         Tcl_ListObjAppendElement(evalIp, cmd, Tcl_NewStringObj("recoverable", -1)) != TCL_OK ||
         Tcl_ListObjAppendElement(evalIp, cmd, pendingMsg ? pendingMsg : Tcl_NewStringObj("", -1)) != TCL_OK)
+        appendOk = 0;
+
+    if (!appendOk)
     {
         Tcl_DecrRefCount(cmd);
         if (pendingMsg)

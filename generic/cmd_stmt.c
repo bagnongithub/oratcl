@@ -43,7 +43,6 @@ static int Oradpi_ConfigStmt(Tcl_Interp* ip, OradpiStmt* s, Tcl_Size objc, Tcl_O
 static const char* const connOptNames[] = {"stmtcachesize",
                                            "fetcharraysize",
                                            "prefetchrows",
-                                           "prefetchmemory",
                                            "calltimeout",
                                            "inlineLobs",
                                            "foMaxAttempts",
@@ -51,20 +50,21 @@ static const char* const connOptNames[] = {"stmtcachesize",
                                            "foBackoffFactor",
                                            "foErrorClasses",
                                            "foDebounceMs",
+                                           "failovercallback",
                                            NULL};
 enum ConnOptIdx
 {
     COPT_STMTCACHE,
     COPT_FETCHARRAY,
     COPT_PREFETCHROWS,
-    COPT_PREFETCHMEM,
     COPT_CALLTIMEOUT,
     COPT_INLINELOBS,
     COPT_FOMAXATT,
     COPT_FOBACKOFF,
     COPT_FOFACTOR,
     COPT_FOCLASSES,
-    COPT_FODEBOUNCE
+    COPT_FODEBOUNCE,
+    COPT_FOCALLBACK
 };
 
 /* Try Tcl_GetIndexFromObj, accepting an optional '-' prefix on the name.
@@ -162,8 +162,6 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
 
         LAPPEND_CHK(ip, res, Tcl_NewStringObj("prefetchrows", -1));
         LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->prefetchRows));
-        LAPPEND_CHK(ip, res, Tcl_NewStringObj("prefetchmemory", -1));
-        LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->prefetchMemory));
 
         if (co->conn)
         {
@@ -195,6 +193,10 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
 
         LAPPEND_CHK(ip, res, Tcl_NewStringObj("foDebounceMs", -1));
         LAPPEND_CHK(ip, res, Oradpi_NewUInt32Obj(co->foDebounceMs));
+
+        /* V-8 fix: expose failovercallback in config listing */
+        LAPPEND_CHK(ip, res, Tcl_NewStringObj("failovercallback", -1));
+        LAPPEND_CHK(ip, res, co->failoverCallback ? co->failoverCallback : Tcl_NewStringObj("", -1));
 
         Tcl_SetObjResult(ip, res);
         return TCL_OK;
@@ -229,9 +231,6 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
             }
             case COPT_PREFETCHROWS:
                 Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->prefetchRows));
-                return TCL_OK;
-            case COPT_PREFETCHMEM:
-                Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->prefetchMemory));
                 return TCL_OK;
             case COPT_CALLTIMEOUT:
             {
@@ -270,6 +269,9 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
             }
             case COPT_FODEBOUNCE:
                 Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(co->foDebounceMs));
+                return TCL_OK;
+            case COPT_FOCALLBACK:
+                Tcl_SetObjResult(ip, co->failoverCallback ? co->failoverCallback : Tcl_NewStringObj("", -1));
                 return TCL_OK;
         }
         /* unreachable */
@@ -314,12 +316,6 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
             case COPT_PREFETCHROWS:
             {
                 if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->prefetchRows, "prefetchrows") != TCL_OK)
-                    return TCL_ERROR;
-                break;
-            }
-            case COPT_PREFETCHMEM:
-            {
-                if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->prefetchMemory, "prefetchmemory") != TCL_OK)
                     return TCL_ERROR;
                 break;
             }
@@ -396,8 +392,28 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
                     return TCL_ERROR;
                 break;
             }
+            case COPT_FOCALLBACK:
+            {
+                /* V-8 fix: Allow failovercallback to be set/changed via oraconfig,
+                 * matching the documented API.  Empty string clears the callback. */
+                if (co->failoverCallback)
+                {
+                    Tcl_DecrRefCount(co->failoverCallback);
+                    co->failoverCallback = NULL;
+                }
+                const char* cbStr = Tcl_GetString(objv[i + 1]);
+                if (cbStr && cbStr[0] != '\0')
+                {
+                    co->failoverCallback = objv[i + 1];
+                    Tcl_IncrRefCount(co->failoverCallback);
+                }
+                break;
+            }
         }
     }
+    /* V-8 fix: After any config change, sync the behavioral policy snapshot
+     * to the shared record so adopters inherit updated values. */
+    Oradpi_SharedConnSyncBehavior(co);
     Tcl_Obj* tmpv[2] = {objv[0], objv[1]};
     return Oradpi_ConfigConn(ip, co, 2, tmpv);
 }
@@ -512,9 +528,8 @@ int Oradpi_Cmd_Open(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv
     OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
+    /* Tcl 9 Tcl_Alloc panics on OOM; NewStmt cannot return NULL. */
     OradpiStmt* s = Oradpi_NewStmt(ip, co);
-    if (!s)
-        return Oradpi_SetError(ip, NULL, -1, "cannot allocate statement");
     Tcl_SetObjResult(ip, s->base.name);
     return TCL_OK;
 }
@@ -598,33 +613,24 @@ int Oradpi_Cmd_Parse(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
             }
         }
     }
-    Oradpi_UpdateStmtType(s);
-
-    dpiStmtInfo info;
-    if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS)
+    /* Force server-side SQL validation via parse-only execution.
+     * dpiConn_prepareStmt only performs client-side preparation; the server
+     * may not validate SQL syntax until actual execution.  PARSE_ONLY forces
+     * a server round-trip that catches syntax errors immediately—without it,
+     * completely invalid SQL like "SELECTX INVALID" is silently accepted
+     * because the client classifies it as a non-query and the auto-execute
+     * path is never taken.  This also ensures the statement type and
+     * metadata are fully resolved before we inspect them below. */
     {
-        CONN_GATE_LEAVE(s->owner);
-        return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_getInfo");
-    }
-    if (info.isQuery)
-    {
-        uint32_t bindCount = 0;
-        if (dpiStmt_getBindCount(s->stmt, &bindCount) != DPI_SUCCESS)
+        uint32_t parseOnlyCols = 0;
+        if (dpiStmt_execute(s->stmt, DPI_MODE_EXEC_PARSE_ONLY, &parseOnlyCols) != DPI_SUCCESS)
         {
             CONN_GATE_LEAVE(s->owner);
-            return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_getBindCount");
-        }
-        if (bindCount == 0)
-        {
-            uint32_t numQueryCols = 0;
-            if (dpiStmt_execute(s->stmt, DPI_MODE_EXEC_DEFAULT, &numQueryCols) != DPI_SUCCESS)
-            {
-                CONN_GATE_LEAVE(s->owner);
-                return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_execute");
-            }
-            s->executedInParse = 1;
+            return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_execute(PARSE_ONLY)");
         }
     }
+
+    Oradpi_UpdateStmtType(s);
     CONN_GATE_LEAVE(s->owner);
 
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));

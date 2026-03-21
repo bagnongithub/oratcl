@@ -50,7 +50,6 @@ typedef struct OradpiAsyncEntry
 
     dpiConn* conn;
     dpiStmt* stmt;
-    OradpiConn* owner;
     GlobalConnRec* shared;
 
     int doCommit;
@@ -500,10 +499,12 @@ static void PoolExitHandler(void* unused)
     Tcl_MutexUnlock(&gPoolInitMutex);
 
 registry_cleanup:
-    /* C-2 fix: Clean up any remaining async registry entries at process exit.
-     * After joining all threads, any remaining entries are either completed
-     * (worker finished but waiter never collected) or orphaned (worker was
-     * stuck and we gave up).  Release their addRef'd ODPI handles. */
+    /* C-2 / V-8 fix: Clean up async registry entries at process exit.
+     * When all workers have exited (remaining == 0), every entry is safe
+     * to free.  When stuck workers remain, only free entries whose worker
+     * has completed (ae->done).  Entries with a still-running worker must
+     * be left alone — their memory will be reclaimed by process exit.
+     * Freeing them here while the worker is active is use-after-free. */
     Tcl_MutexLock(&gAsyncMutex);
     if (gAsyncInit)
     {
@@ -512,8 +513,18 @@ registry_cleanup:
         for (e = Tcl_FirstHashEntry(&gAsyncByKey, &hs); e; e = Tcl_NextHashEntry(&hs))
         {
             OradpiAsyncEntry* ae = (OradpiAsyncEntry*)Tcl_GetHashValue(e);
-            if (ae)
-                AsyncFreeEntry(ae);
+            if (!ae)
+                continue;
+            if (remaining > 0)
+            {
+                /* Workers still alive — only free completed entries */
+                Tcl_MutexLock(&ae->lock);
+                int done = ae->done;
+                Tcl_MutexUnlock(&ae->lock);
+                if (!done)
+                    continue; /* worker still running; skip */
+            }
+            AsyncFreeEntry(ae);
         }
         Tcl_DeleteHashTable(&gAsyncByKey);
         gAsyncInit = 0;
@@ -770,7 +781,6 @@ int Oradpi_Cmd_ExecAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
     Oradpi_SharedConnAddRef(s->owner->shared);
 
     Tcl_MutexLock(&ae->lock);
-    ae->owner = s->owner;
     ae->doCommit = commit;
     ae->autocommit = s->owner->autocommit;
     /* Snapshot failover policy under lock so the worker thread never reads
@@ -932,6 +942,19 @@ int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
     Oradpi_PendingsForget(ip, skey);
     Oradpi_UpdateStmtType(s);
 
+    /* V-8 fix: Record rows affected on async success.  The sync execute path
+     * calls dpiStmt_getRowCount + Oradpi_RecordRows, but the async worker
+     * did not, and orawaitasync didn't either.  Without this, "oramsg $S rows"
+     * after oraexecasync/orawaitasync reported stale data. */
+    if (rc == 0 && s->stmt && s->owner)
+    {
+        CONN_GATE_ENTER(s->owner);
+        uint64_t rows = 0;
+        if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
+            Oradpi_RecordRows((OradpiBase*)s, rows);
+        CONN_GATE_LEAVE(s->owner);
+    }
+
     if (rc != 0)
     {
         if (errMsg)
@@ -1070,10 +1093,12 @@ void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co)
         if (!ae)
             continue;
 
-        /* V-2 fix: acquire ae->lock while holding gAsyncMutex (respecting
-         * lock order) to safely read mutable fields owner and stmtKey. */
+        /* V-2 / V-8 fix: acquire ae->lock while holding gAsyncMutex (respecting
+         * lock order) to safely read mutable fields.  Compare via the stable
+         * GlobalConnRec* shared identity instead of the raw OradpiConn* wrapper
+         * pointer, which can be freed and reused (ABA risk). */
         Tcl_MutexLock(&ae->lock);
-        if (ae->owner != co)
+        if (ae->shared != co->shared)
         {
             Tcl_MutexUnlock(&ae->lock);
             continue;
@@ -1184,10 +1209,12 @@ void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co)
                 if (now.sec > deadline.sec || (now.sec == deadline.sec && now.usec >= deadline.usec))
                     break;
             }
+            int wasOrphaned = 0;
             if (!ae->done && ae->running)
             {
                 /* Timed out — mark orphaned so worker self-cleans */
                 ae->orphaned = 1;
+                wasOrphaned = 1;
                 Tcl_MutexUnlock(&ae->lock);
             }
             else
@@ -1198,7 +1225,12 @@ void Oradpi_CancelAndJoinAllForConn(Tcl_Interp* ip, OradpiConn* co)
             }
             AsyncRelease(ae); /* V-1 fix: release the ref from the scan loop */
 
-            if (ip && keyNames[i])
+            /* V-8 fix: Only release bind-side pending refs when the worker
+             * was successfully joined.  If the entry was orphaned (worker
+             * still running), the worker may still be inside dpiStmt_execute()
+             * using these dpiVar* references — freeing them here would be
+             * use-after-free.  The worker will clean up on completion. */
+            if (!wasOrphaned && ip && keyNames[i])
             {
                 Oradpi_PendingsForget(ip, keyNames[i]);
             }

@@ -177,7 +177,7 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             }
             Tcl_Size bl = 0;
             unsigned char* bv = Tcl_GetByteArrayFromObj(objv[3], &bl);
-            uint64_t offset = 1;
+            uint64_t offset = 0; /* 0 = sentinel meaning "append" */
             for (Tcl_Size i = 4; i < objc; i++)
             {
                 const char* o = Tcl_GetString(objv[i]);
@@ -195,6 +195,17 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             }
             if (bl > 0)
             {
+                /* When no -offset is given, append after current content */
+                if (offset == 0)
+                {
+                    uint64_t sz = 0;
+                    Oradpi_SharedConnGateEnter(l->shared);
+                    int sok = dpiLob_getSize(l->lob, &sz);
+                    Oradpi_SharedConnGateLeave(l->shared);
+                    if (sok != DPI_SUCCESS)
+                        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_getSize");
+                    offset = sz + 1;
+                }
                 Oradpi_SharedConnGateEnter(l->shared);
                 int wok = dpiLob_writeBytes(l->lob, offset, (const char*)bv, (uint64_t)bl);
                 Oradpi_SharedConnGateLeave(l->shared);

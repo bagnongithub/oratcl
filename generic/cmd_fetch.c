@@ -392,8 +392,8 @@ static Tcl_Obj* SnapshotCellToObj(Tcl_Interp* ip, OradpiStmt* st, OradpiFetchCel
  *   per-row callbacks, and result format (dict, array, etc.).
  *   Returns: 0 (rows fetched), 1403 (no data found), or a row list when
  *   -returnrows is used.
- *   Errors:  ODPI-C fetch errors; invalid handle; async busy.
- *   Thread-safety: safe — per-interp state only; blocks if async busy.
+ *   Errors:  ODPI-C fetch errors; invalid handle; async busy (errors immediately).
+ *   Thread-safety: safe — per-interp state only.
  */
 int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
@@ -403,7 +403,11 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     Tcl_Obj* cmd = NULL;
     Tcl_WideInt maxRows = 0;
     Tcl_Obj* resultVar = NULL;
-    int returnRows = 1;
+    /* V-8 fix: default to status-code mode (0 / 1403) as documented.
+     * The old default of 1 caused plain "orafetch $S" to materialize the
+     * entire result set into a list, contradicting the docs and risking
+     * OOM on large queries.  -returnrows explicitly enables list mode. */
+    int returnRows = 0;
     int asDict = 0;
 
     uint32_t numCols = 0;
@@ -533,7 +537,10 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
 
     if (maxRows < 0)
         return Oradpi_SetError(ip, (OradpiBase*)st, -1, "orafetch: -max must be >= 0");
-    if (!returnRows && maxRows == 0)
+    /* Default to single-row fetch only in plain status-code mode.
+     * When -command, -resultvar, or -returnrows is active, fetch all rows
+     * unless the caller explicitly provides -max. */
+    if (!returnRows && !cmd && !resultVar && maxRows == 0)
         maxRows = 1;
 
     CONN_GATE_ENTER(st->owner);
@@ -599,7 +606,7 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         memset(numberKeys, 0, keyBytes);
         for (uint32_t c = 0; c < numCols; c++)
         {
-            numberKeys[c] = Tcl_ObjPrintf("%u", c + 1);
+            numberKeys[c] = Tcl_ObjPrintf("%u", c);
             Tcl_IncrRefCount(numberKeys[c]);
         }
     }
@@ -684,17 +691,12 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         {
             if (asDict)
             {
-                if (Tcl_ListObjAppendElement(ip, rowObj, colNames[c]) != TCL_OK ||
-                    Tcl_ListObjAppendElement(ip, rowObj, colVals[c]) != TCL_OK)
-                {
-                    code = TCL_ERROR;
-                    goto cleanup;
-                }
+                LAPPEND_GOTO(ip, rowObj, colNames[c], code, cleanup);
+                LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
             }
-            else if (Tcl_ListObjAppendElement(ip, rowObj, colVals[c]) != TCL_OK)
+            else
             {
-                code = TCL_ERROR;
-                goto cleanup;
+                LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
             }
         }
 
@@ -740,14 +742,16 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
             }
         }
 
-        if (rowsList && Tcl_ListObjAppendElement(ip, rowsList, rowObj) != TCL_OK)
+        if (rowsList)
         {
-            code = TCL_ERROR;
-            goto cleanup;
+            LAPPEND_GOTO(ip, rowsList, rowObj, code, cleanup);
         }
 
         Tcl_DecrRefCount(rowObj);
         rowObj = NULL;
+        /* Freeing rowObj may have freed the colVals[] elements it owned.
+         * Zero the array so cleanup never touches dangling pointers. */
+        memset(colVals, 0, colValBytes);
 
         fetched++;
         if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
@@ -790,14 +794,10 @@ cleanup:
     }
     if (colVals)
     {
-        for (uint32_t c = 0; c < numCols; c++)
-        {
-            if (colVals[c])
-            {
-                Tcl_IncrRefCount(colVals[c]);
-                Tcl_DecrRefCount(colVals[c]);
-            }
-        }
+        /* colVals[] entries are owned by rowObj or rowsList — they are
+         * released when those containers are freed above.  Any surviving
+         * non-NULL entry here still has a live owner; we must not touch
+         * its refcount.  Just free the pointer array itself. */
         Tcl_Free((char*)colVals);
     }
     if (colNames)

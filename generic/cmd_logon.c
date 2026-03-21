@@ -107,9 +107,10 @@ static int Oradpi_ParseConnect(const char* cs,
         }
         else
         {
-            /* No closing quote — treat entire remainder as password */
-            *pw = pwStart;
-            SAFE_U32(*plen, strlen(pwStart));
+            /* V-8 fix: Reject missing closing quote instead of silently
+             * treating the rest of the string as the password.  The old
+             * behavior was ambiguous and error-prone for production use. */
+            return -1;
         }
         return 0;
     }
@@ -262,7 +263,7 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     /* V-6 fix: reject pathological connect strings whose components
      * exceed uint32_t range instead of silently clamping. */
     if (Oradpi_ParseConnect(connstr, &user, &ulen, &pw, &plen, &db, &dblen, &ext) != 0)
-        return Oradpi_SetError(ip, NULL, -1, "connect string component exceeds maximum length");
+        return Oradpi_SetError(ip, NULL, -1, "malformed connect string (missing closing quote or component exceeds maximum length)");
 
     dpiContext* ctx = Oradpi_GetDpiContext();
     if (!ctx)
@@ -314,21 +315,8 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
             return Oradpi_SetErrorFromODPI(ip, NULL, "dpiConn_create");
     }
 
+    /* Tcl 9 Tcl_Alloc panics on OOM; NewConn cannot return NULL. */
     OradpiConn* co = Oradpi_NewConn(ip, conn, pool);
-    if (!co)
-    {
-        if (conn)
-        {
-            dpiConn_close(conn, DPI_MODE_CONN_CLOSE_DEFAULT, NULL, 0);
-            dpiConn_release(conn);
-        }
-        if (pool)
-        {
-            dpiPool_close(pool, DPI_MODE_POOL_CLOSE_DEFAULT);
-            dpiPool_release(pool);
-        }
-        return Oradpi_SetError(ip, NULL, -1, "failed to allocate logon handle");
-    }
 
     co->ownerIp = ip;
     co->ownerTid = Tcl_GetCurrentThread();
@@ -373,11 +361,55 @@ int Oradpi_Cmd_Logoff(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const ob
     /* Cancel all pending async operations on this connection first */
     Oradpi_CancelAndJoinAllForConn(ip, co);
 
+    /* V-8 fix: Free LOBs associated with this connection before closing it.
+     * Without this, oralogoff left open LOB handles in st->lobs pointing at
+     * dpiLob* objects backed by a now-closed connection.  Mirrors the phased
+     * cleanup order in Oradpi_DeleteInterpData: async → LOBs → stmts → conn. */
+    OradpiInterpState* st = (OradpiInterpState*)Tcl_GetAssocData(ip, "oradpi", NULL);
+    if (st)
+    {
+        Tcl_Size lobCap = 8, lobCount = 0;
+        size_t lobBytes = 0;
+        if (Oradpi_CheckedAllocBytes(ip, lobCap, sizeof(OradpiLob*), &lobBytes, "LOB teardown table") != TCL_OK)
+            return TCL_ERROR;
+        OradpiLob** lobsToFree = (OradpiLob**)Tcl_Alloc(lobBytes);
+
+        Tcl_HashSearch lSearch;
+        Tcl_HashEntry* lEntry;
+        for (lEntry = Tcl_FirstHashEntry(&st->lobs, &lSearch); lEntry; lEntry = Tcl_NextHashEntry(&lSearch))
+        {
+            OradpiLob* l = (OradpiLob*)Tcl_GetHashValue(lEntry);
+            if (l && l->shared == co->shared)
+            {
+                if (lobCount == lobCap)
+                {
+                    if (lobCap > TCL_SIZE_MAX / 2)
+                    {
+                        Tcl_Free((char*)lobsToFree);
+                        return Oradpi_SetError(ip, (OradpiBase*)co, -1, "LOB teardown table is too large");
+                    }
+                    Tcl_Size newCap = lobCap * 2;
+                    size_t newBytes = 0;
+                    if (Oradpi_CheckedAllocBytes(ip, newCap, sizeof(OradpiLob*), &newBytes, "LOB teardown table") != TCL_OK)
+                    {
+                        Tcl_Free((char*)lobsToFree);
+                        return TCL_ERROR;
+                    }
+                    lobsToFree = (OradpiLob**)Tcl_Realloc((char*)lobsToFree, newBytes);
+                    lobCap = newCap;
+                }
+                lobsToFree[lobCount++] = l;
+            }
+        }
+        for (Tcl_Size i = 0; i < lobCount; i++)
+            Oradpi_RemoveLob(ip, lobsToFree[i]);
+        Tcl_Free((char*)lobsToFree);
+    }
+
     /* M-5 fix: Collect and fully remove all statements owned by this connection.
      * The old code manually closed stmt handles but left the OradpiStmt structs
      * in the stmts hash table, causing double cleanup during interp teardown.
      * We collect pointers first since Oradpi_RemoveStmt modifies the hash. */
-    OradpiInterpState* st = (OradpiInterpState*)Tcl_GetAssocData(ip, "oradpi", NULL);
     if (st)
     {
         Tcl_Size stmtCap = 8, stmtCount = 0;

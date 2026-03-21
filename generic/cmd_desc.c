@@ -155,21 +155,20 @@ int Oradpi_Cmd_Cols(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv
     {
         Tcl_Obj* entry = Tcl_NewListObj(0, NULL);
         Tcl_IncrRefCount(entry);
-        if (Tcl_ListObjAppendElement(ip, entry, Tcl_NewStringObj("name", -1)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, entry, Tcl_NewStringObj(cols[i].name, (Tcl_Size)cols[i].nameLen)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, entry, Tcl_NewStringObj("nullable", -1)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, entry, Tcl_NewBooleanObj(cols[i].nullOk)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, entry, Tcl_NewStringObj("dbSize", -1)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, entry, Oradpi_NewUInt32Obj(cols[i].dbSize)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, entry, Tcl_NewStringObj("charSize", -1)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, entry, Oradpi_NewUInt32Obj(cols[i].charSize)) != TCL_OK ||
-            Tcl_ListObjAppendElement(ip, res, entry) != TCL_OK)
-        {
-            Tcl_DecrRefCount(entry);
-            code = TCL_ERROR;
-            goto cleanup;
-        }
+        LAPPEND_GOTO(ip, entry, Tcl_NewStringObj("name", -1), code, entry_err);
+        LAPPEND_GOTO(ip, entry, Tcl_NewStringObj(cols[i].name, (Tcl_Size)cols[i].nameLen), code, entry_err);
+        LAPPEND_GOTO(ip, entry, Tcl_NewStringObj("nullable", -1), code, entry_err);
+        LAPPEND_GOTO(ip, entry, Tcl_NewBooleanObj(cols[i].nullOk), code, entry_err);
+        LAPPEND_GOTO(ip, entry, Tcl_NewStringObj("dbSize", -1), code, entry_err);
+        LAPPEND_GOTO(ip, entry, Oradpi_NewUInt32Obj(cols[i].dbSize), code, entry_err);
+        LAPPEND_GOTO(ip, entry, Tcl_NewStringObj("charSize", -1), code, entry_err);
+        LAPPEND_GOTO(ip, entry, Oradpi_NewUInt32Obj(cols[i].charSize), code, entry_err);
+        LAPPEND_GOTO(ip, res, entry, code, entry_err);
         Tcl_DecrRefCount(entry);
+        continue;
+    entry_err:
+        Tcl_DecrRefCount(entry);
+        goto cleanup;
     }
     Tcl_SetObjResult(ip, res);
 
@@ -287,17 +286,16 @@ int Oradpi_Cmd_Desc(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv
     {
         Tcl_Obj* entry = Tcl_NewListObj(0, NULL);
         Tcl_IncrRefCount(entry);
-        if (Tcl_ListObjAppendElement(ip, entry, Tcl_NewStringObj(cols[i].name, (Tcl_Size)cols[i].nameLen)) != TCL_OK ||
-            Tcl_ListObjAppendElement(
-                ip, entry, Tcl_NewStringObj(cols[i].oracleTypeNum == DPI_ORACLE_TYPE_NUMBER ? "NUMBER" : "OTHER", -1)) !=
-                TCL_OK ||
-            Tcl_ListObjAppendElement(ip, res, entry) != TCL_OK)
-        {
-            Tcl_DecrRefCount(entry);
-            code = TCL_ERROR;
-            goto cleanup;
-        }
+        LAPPEND_GOTO(ip, entry, Tcl_NewStringObj(cols[i].name, (Tcl_Size)cols[i].nameLen), code, entry_err);
+        LAPPEND_GOTO(ip, entry,
+            Tcl_NewStringObj(cols[i].oracleTypeNum == DPI_ORACLE_TYPE_NUMBER ? "NUMBER" : "OTHER", -1),
+            code, entry_err);
+        LAPPEND_GOTO(ip, res, entry, code, entry_err);
         Tcl_DecrRefCount(entry);
+        continue;
+    entry_err:
+        Tcl_DecrRefCount(entry);
+        goto cleanup;
     }
     Tcl_SetObjResult(ip, res);
 

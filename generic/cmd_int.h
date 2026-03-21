@@ -114,6 +114,7 @@ int Oradpi_CaptureODPIError(dpiErrorInfo* ei);
 
 #define ORATCL_NAMESPACE "::oratcl"
 
+/* V-8: Keep in sync with AC_INIT version in configure.ac */
 #define ORATCL_VERSION "9.0"
 #define ORATCL_TCL_MIN "9"
 
@@ -228,6 +229,19 @@ static inline int Oradpi_CheckedAllocBytes(Tcl_Interp* ip, Tcl_Size count, size_
             return TCL_ERROR;                                                                                                    \
     } while (0)
 
+/* V-8 fix: Cleanup-compatible variant — jumps to a label instead of
+ * returning, for use in functions that need resource cleanup on error
+ * (cmd_desc.c, cmd_fetch.c, util.c). Sets code=TCL_ERROR before goto. */
+#define LAPPEND_GOTO(ip, list, obj, errcode, label)                                                                              \
+    do                                                                                                                           \
+    {                                                                                                                            \
+        if (Tcl_ListObjAppendElement((ip), (list), (obj)) != TCL_OK)                                                             \
+        {                                                                                                                        \
+            (errcode) = TCL_ERROR;                                                                                               \
+            goto label;                                                                                                          \
+        }                                                                                                                        \
+    } while (0)
+
 /* State ops */
 OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool);
 OradpiConn* Oradpi_LookupConn(Tcl_Interp* ip, Tcl_Obj* nameObj);
@@ -239,6 +253,7 @@ void Oradpi_FreeStmt(Tcl_Interp* ip, OradpiStmt* s);
 void Oradpi_FreeLob(OradpiLob* l);
 void Oradpi_DeleteInterpData(void* clientData, Tcl_Interp* ip);
 void Oradpi_RemoveStmt(Tcl_Interp* ip, OradpiStmt* s);
+void Oradpi_RemoveLob(Tcl_Interp* ip, OradpiLob* l);
 
 int Oradpi_DpiContextEnsure(Tcl_Interp* ip);
 
