@@ -1,0 +1,114 @@
+# -*-Tcl-*-
+# 30-multi-thread.test — concurrency using Thread package
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 30-1.0 {parallel queries in worker threads} -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 4} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    package require oratcl 9.0
+                    set L [oralogon $::env(ORATCL_CONNECT)]
+                    set S [oraopen $L]
+                    oraparse $S {select 1 from dual}
+                    oraexec $S
+                    orafetch $S -datavariable r -indexbynumber
+                    oraclose $S
+                    oralogoff $L
+                    set _rc 0
+                } finally {
+                    thread::exit $_rc
+                }
+            }
+        }
+    }
+    set ok 1
+    foreach tid $tids {
+        if {[thread::join $tid] ne "0"} {set ok 0}
+    }
+    set ok
+} -result 1
+
+test 30-1.1 {parallel DML in worker threads} -constraints {have_connect have_thread} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, tid NUMBER)"]
+        set cs [::OratclTest::connstr]
+
+        set tids {}
+        for {set i 0} {$i < 4} {incr i} {
+            set tid [thread::create -joinable]
+            lappend tids $tid
+            thread::send $tid [list set ::env(ORATCL_CONNECT) $cs]
+            thread::send $tid [list set ::T $T]
+            thread::send $tid [list set ::tid_num $i]
+            catch {
+                thread::send $tid {
+                    set _rc 1
+                    try {
+                        package require oratcl 9.0
+                        set L [oralogon $::env(ORATCL_CONNECT)]
+                        set S [oraopen $L]
+                        oraparse $S "INSERT INTO $::T VALUES (:id, :tid)"
+                        for {set k 0} {$k < 10} {incr k} {
+                            orabind $S :id [expr {$::tid_num * 100 + $k}] :tid $::tid_num
+                            oraexec $S
+                        }
+                        oracommit $L
+                        oraclose $S
+                        oralogoff $L
+                        set _rc 0
+                    } finally {
+                        thread::exit $_rc
+                    }
+                }
+            }
+        }
+        set ok 1
+        foreach tid $tids {
+            if {[thread::join $tid] ne "0"} {set ok 0}
+        }
+        set count [::OratclTest::count_rows $L $T]
+        list $ok [expr {$count == 40}]
+    }
+} -result {1 1}
+
+test 30-1.2 {parallel async exec in worker threads} -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 3} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    package require oratcl 9.0
+                    set L [oralogon $::env(ORATCL_CONNECT)]
+                    set S [oraopen $L]
+                    oraparse $S {select 1 from dual}
+                    oraexecasync $S
+                    set wrc [orawaitasync $S -timeout 5000]
+                    oraclose $S
+                    oralogoff $L
+                    set _rc $wrc
+                } finally {
+                    thread::exit $_rc
+                }
+            }
+        }
+    }
+    set ok 1
+    foreach tid $tids {
+        if {[thread::join $tid] ne "0"} {set ok 0}
+    }
+    set ok
+} -result 1
+
+cleanupTests

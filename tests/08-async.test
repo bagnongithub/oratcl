@@ -1,0 +1,148 @@
+# -*-Tcl-*-
+# 08-async.test — oraexecasync, orawaitasync, orabreak, edge cases
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# ---- Basic async lifecycle ----
+
+test 08-1.0 {oraexecasync + orawaitasync roundtrip} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT 1 FROM DUAL"
+        oraexecasync $S
+        set rc [orawaitasync $S -timeout 5000]
+        oraclose $S
+        set rc
+    }
+} -result 0
+
+test 08-1.1 {oraexecasync with -commit} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (1, 'async')"
+        oraexecasync $S -commit
+        set rc [orawaitasync $S -timeout 5000]
+        oraclose $S
+        list $rc [::OratclTest::count_rows $L $T]
+    }
+} -result {0 1}
+
+test 08-1.2 {orawaitasync timeout returns -3123} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT /*+ materialize */ level FROM dual CONNECT BY level <= 500000"
+        oraexecasync $S
+        # Very short timeout
+        set rc [orawaitasync $S -timeout 1]
+        oraclose $S
+        # Either timed out (-3123) or completed fast (0)
+        expr {$rc == 0 || $rc == -3123}
+    }
+} -result 1
+
+# ---- orabreak ----
+
+test 08-2.0 {orabreak is callable and returns 0} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        orabreak $L
+    }
+} -result 0
+
+test 08-2.1 {orabreak on invalid handle errors} -body {
+    package require oratcl 9.0
+    catch {orabreak bogus_handle} msg
+    string match "*invalid*" $msg
+} -result 1
+
+# ---- Busy-guard: commands refuse when async in-flight ----
+
+test 08-3.0 {orabind refuses when async busy} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT /*+ materialize */ level FROM dual CONNECT BY level <= 100000"
+        oraexecasync $S
+        set rc [catch {orabind $S :x 1} err]
+        catch {orawaitasync $S -timeout 5000}
+        oraclose $S
+        list $rc [string match "*busy*async*" $err]
+    }
+} -result {1 1}
+
+test 08-3.1 {orasql refuses when async busy} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT /*+ materialize */ level FROM dual CONNECT BY level <= 100000"
+        oraexecasync $S
+        set rc [catch {orasql $S "SELECT 1 FROM dual"} err]
+        catch {orawaitasync $S -timeout 5000}
+        oraclose $S
+        list $rc [string match "*busy*async*" $err]
+    }
+} -result {1 1}
+
+test 08-3.2 {orafetch refuses when async busy} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT /*+ materialize */ level FROM dual CONNECT BY level <= 100000"
+        oraexecasync $S
+        set rc [catch {orafetch $S} err]
+        catch {orawaitasync $S -timeout 5000}
+        oraclose $S
+        list $rc [string match "*busy*async*" $err]
+    }
+} -result {1 1}
+
+# Note: oraparse is intentionally NOT tested for async-busy guard.
+# oraparse is a client-side prepare that does not touch the async worker
+# or the server connection — it is correct that it succeeds while async
+# is in-flight.
+
+# ---- oraclose during async ----
+
+test 08-4.0 {oraclose during async does not hang} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT /*+ materialize */ level FROM dual CONNECT BY level <= 100000"
+        oraexecasync $S
+        set before [clock milliseconds]
+        oraclose $S
+        set elapsed [expr {[clock milliseconds] - $before}]
+        expr {$elapsed < 60000}
+    }
+} -result 1
+
+# ---- Sequential async on same handle ----
+
+test 08-5.0 {sequential async ops on same handle} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT 1 FROM DUAL"
+        set results {}
+        for {set i 0} {$i < 5} {incr i} {
+            oraexecasync $S
+            lappend results [orawaitasync $S -timeout 5000]
+        }
+        oraclose $S
+        expr {[lsort -unique $results] eq "0"}
+    }
+} -result 1
+
+# ---- Async rows affected (MAJOR #7 fix) ----
+
+test 08-6.0 {oramsg rows after async DML} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 3
+        set S [oraopen $L]
+        oraparse $S "DELETE FROM $T"
+        oraexecasync $S -commit
+        set wrc [orawaitasync $S -timeout 5000]
+        set rows [oramsg $S rows]
+        oraclose $S
+        list $wrc $rows
+    }
+} -result {0 3}
+
+cleanupTests

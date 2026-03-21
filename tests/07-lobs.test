@@ -1,0 +1,200 @@
+# -*-Tcl-*-
+# 07-lobs.test — CLOB/BLOB: oralob size|read|write|trim|close, handle vs inline
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+proc ::OratclTest::mk_lob_table {L} {
+    return [::OratclTest::mk_table $L \
+        "(id NUMBER PRIMARY KEY, c CLOB, b BLOB)" oratcl9_lob]
+}
+
+proc ::OratclTest::bigtext {n} {
+    set s ""
+    for {set i 0} {$i < $n} {incr i} {
+        append s ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+    }
+    return $s
+}
+
+# ---- LOB handle mode ----
+
+test 07-1.0 {LOB handles: size, read, trim, close} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraautocommit $L 0
+        set T [::OratclTest::mk_lob_table $L]
+        set big [::OratclTest::bigtext 100]
+        set blob [binary format a* "hello"]
+
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO ${T}(id,c,b) VALUES (:id,:c,:b)"
+        orabind $S :id 1 :c $big :b $blob
+        oraexec $S -commit
+        oraclose $S
+
+        oraconfig $L inlineLobs 0
+        set S [oraopen $L]
+        oraparse $S "SELECT c, b FROM ${T} WHERE id=1 FOR UPDATE"
+        oraexec $S
+        set rc [orafetch $S -asdict -datavariable row]
+        oraclose $S
+        if {$rc != 0} {error "unexpected rc=$rc"}
+
+        set ch [dict get $row C]
+        set bh [dict get $row B]
+
+        set csize [oralob size $ch]
+        set bsize [oralob size $bh]
+        set cprefix [oralob read $ch -offset 1 -amount 32]
+
+        oralob trim $ch [expr {$csize - 10}]
+        set csize2 [oralob size $ch]
+        oracommit $L
+
+        oralob close $ch
+        oralob close $bh
+
+        list [expr {$csize > 6000}] $bsize [string length $cprefix] \
+             [expr {$csize2 == $csize - 10}]
+    }
+} -result {1 5 32 1}
+
+test 07-1.1 {oralob read with offset and amount} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraautocommit $L 0
+        set T [::OratclTest::mk_lob_table $L]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO ${T}(id,c) VALUES (1, 'ABCDEFGHIJ')"
+        oraexec $S -commit
+        oraclose $S
+
+        oraconfig $L inlineLobs 0
+        set S [oraopen $L]
+        orasql $S "SELECT c FROM ${T} WHERE id=1 FOR UPDATE"
+        orafetch $S -datavariable row -indexbynumber
+        oraclose $S
+
+        set ch [lindex $row 0]
+        # Read 3 chars starting at offset 4 (1-based) => "DEF"
+        set snippet [oralob read $ch -offset 4 -amount 3]
+        oralob close $ch
+        oracommit $L
+        set snippet
+    }
+} -result {DEF}
+
+test 07-1.2 {oralob write appends data} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraautocommit $L 0
+        set T [::OratclTest::mk_lob_table $L]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO ${T}(id,c) VALUES (1, 'HELLO')"
+        oraexec $S -commit
+        oraclose $S
+
+        oraconfig $L inlineLobs 0
+        set S [oraopen $L]
+        orasql $S "SELECT c FROM ${T} WHERE id=1 FOR UPDATE"
+        orafetch $S -datavariable row -indexbynumber
+        oraclose $S
+
+        set ch [lindex $row 0]
+        set before [oralob size $ch]
+        oralob write $ch " WORLD"
+        set after [oralob size $ch]
+        oralob close $ch
+        oracommit $L
+
+        list $before $after [expr {$after == $before + 6}]
+    }
+} -result {5 11 1}
+
+test 07-1.3 {oralob close on already-closed handle errors} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraautocommit $L 0
+        set T [::OratclTest::mk_lob_table $L]
+        set S [oraopen $L]
+        orasql $S "INSERT INTO ${T}(id,c) VALUES (1, 'X')" -commit
+        oraclose $S
+
+        oraconfig $L inlineLobs 0
+        set S [oraopen $L]
+        orasql $S "SELECT c FROM ${T} WHERE id=1 FOR UPDATE"
+        orafetch $S -datavariable row -indexbynumber
+        oraclose $S
+
+        set ch [lindex $row 0]
+        oralob close $ch
+        set rc [catch {oralob close $ch} msg]
+        oracommit $L
+        list $rc [string match "*invalid*" $msg]
+    }
+} -result {1 1}
+
+# ---- Inline LOBs ----
+
+test 07-2.0 {inline LOBs arrive as data} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_lob_table $L]
+        set big [::OratclTest::bigtext 40]
+        set blob [binary format a* "hello"]
+
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO ${T}(id,c,b) VALUES (:id,:c,:b)"
+        orabind $S :id 1 :c $big :b $blob
+        oraexec $S -commit
+        oraclose $S
+
+        oraconfig $L inlineLobs 1
+        set S [oraopen $L]
+        orasql $S "SELECT c, b FROM ${T} WHERE id=1"
+        orafetch $S -datavariable row -indexbynumber
+        oraclose $S
+
+        set clen [string length [lindex $row 0]]
+        set blen [string length [lindex $row 1]]
+        expr {$clen == [string length $big] && $blen == 5}
+    }
+} -result 1
+
+# ---- oralob subcommand errors ----
+
+test 07-3.0 {oralob invalid subcommand} -body {
+    package require oratcl 9.0
+    catch {oralob bogus x} msg
+    string match "*bad*" $msg
+} -result 1
+
+test 07-3.1 {oralob size on invalid handle} -body {
+    package require oratcl 9.0
+    catch {oralob size bogus_handle} msg
+    string match "*invalid*" $msg
+} -result 1
+
+# ---- LOBs cleaned up on oralogoff (MAJOR #1 fix) ----
+
+test 07-4.0 {oralogoff cleans up open LOB handles} -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    oraautocommit $L 0
+    set T [::OratclTest::mk_table $L "(id NUMBER, c CLOB)" oratcl9_lob2]
+    set S [oraopen $L]
+    orasql $S "INSERT INTO ${T}(id,c) VALUES (1, 'test')" -commit
+    oraclose $S
+
+    oraconfig $L inlineLobs 0
+    set S [oraopen $L]
+    orasql $S "SELECT c FROM ${T} WHERE id=1 FOR UPDATE"
+    orafetch $S -datavariable row -indexbynumber
+    oraclose $S
+
+    set ch [lindex $row 0]
+    # LOB handle is open. oralogoff should clean it up without crash.
+    oralogoff $L
+    # If we get here without segfault, the fix works.
+    # The LOB handle should now be invalid.
+    set rc [catch {oralob size $ch} msg]
+    list $rc [string match "*invalid*" $msg]
+} -result {1 1}
+
+cleanupTests

@@ -1,0 +1,120 @@
+# -*-Tcl-*-
+# 01-connection.test — connect/disconnect, info, autocommit, error paths
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# ---- Basic lifecycle ----
+
+test 01-1.0 {oralogon/oralogoff roundtrip} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        expr {[string match "oraL*" $L]}
+    }
+} -result 1
+
+test 01-1.1 {double oralogoff is safe} -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    oralogoff $L
+    set rc [catch {oralogoff $L} msg]
+    list $rc [string match "*invalid*" $msg]
+} -result {1 1}
+
+test 01-1.2 {oralogoff with open statements succeeds} -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set S1 [oraopen $L]
+    set S2 [oraopen $L]
+    # logoff should clean up both statements
+    set rc [oralogoff $L]
+    # Verify they're gone
+    set e1 [catch {oraclose $S1}]
+    set e2 [catch {oraclose $S2}]
+    list $rc $e1 $e2
+} -result {0 1 1}
+
+# ---- Pool connection ----
+
+test 01-2.0 {oralogon with session pool} -constraints {have_connect} -body {
+    set cs [::OratclTest::connstr]
+    package require oratcl 9.0
+    set L [oralogon $cs -pool 1 2 1 -homogeneous 1 -getmode wait]
+    set S [oraopen $L]
+    oraparse $S {select 1 from dual}
+    oraexec $S
+    oraclose $S
+    oralogoff $L
+    expr 1
+} -result 1
+
+# ---- orainfo ----
+
+test 01-3.0 {orainfo returns dict with autocommit} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set info [orainfo $L]
+        dict exists $info autocommit
+    }
+} -result 1
+
+test 01-3.1 {orainfo reflects autocommit toggle} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraautocommit $L 0
+        set a0 [dict get [orainfo $L] autocommit]
+        oraautocommit $L 1
+        set a1 [dict get [orainfo $L] autocommit]
+        list $a0 $a1
+    }
+} -result {0 1}
+
+# ---- oraautocommit ----
+
+test 01-4.0 {oraautocommit returns current value} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set v0 [oraautocommit $L 0]
+        set v1 [oraautocommit $L 1]
+        list $v0 $v1
+    }
+} -result {0 1}
+
+# ---- Error handling ----
+
+test 01-5.0 {invalid handle errors are clear} -constraints {have_connect} -body {
+    package require oratcl 9.0
+    catch {oraopen xyz} msg
+    string match "*invalid*logon*handle*" $msg
+} -result 1
+
+test 01-5.1 {invalid connect string rejected} -body {
+    package require oratcl 9.0
+    set rc [catch {oralogon ""} msg]
+    expr {$rc == 1}
+} -result 1
+
+test 01-5.2 {oralogon with malformed quoted password rejected} -body {
+    package require oratcl 9.0
+    set rc [catch {oralogon {user/"no_close_quote@db}} msg]
+    list $rc [string match "*malformed*" $msg]
+} -result {1 1}
+
+test 01-5.3 {oralogon with valid quoted password syntax parses} -body {
+    package require oratcl 9.0
+    # Should fail at connect level, not parse level
+    set rc [catch {oralogon {testuser/"p@ss/word"@nonexistent_db_12345}} msg]
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
+# ---- Wrong argument counts ----
+
+test 01-6.0 {oralogon no args} -body {
+    package require oratcl 9.0
+    catch {oralogon} msg
+    expr {$msg ne ""}
+} -result 1
+
+test 01-6.1 {oralogoff no args} -body {
+    package require oratcl 9.0
+    catch {oralogoff} msg
+    expr {$msg ne ""}
+} -result 1
+
+cleanupTests

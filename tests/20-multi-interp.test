@@ -1,0 +1,155 @@
+# -*-Tcl-*-
+# 20-multi-interp.test — multi-interpreter stability and handle adoption
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 20-1.0 {basic use in a child interp} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set child [interp create]
+        interp eval $child [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        interp eval $child {
+            package require oratcl 9.0
+            set L2 [oralogon $::env(ORATCL_CONNECT)]
+            set S2 [oraopen $L2]
+            oraparse $S2 {select 1 from dual}
+            oraexec $S2
+            oraclose $S2
+            oralogoff $L2
+        }
+        interp delete $child
+        expr 1
+    }
+} -result 1
+
+test 20-1.1 {adopt connection handle across interps} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        interp eval $child {
+            set S [oraopen $L]
+            oraparse $S {select 1 from dual}
+            oraexec $S
+            oraclose $S
+            oralogoff $L
+        }
+        interp delete $child
+        # Parent connection should still work
+        set S [oraopen $L]
+        oraclose $S
+        expr 1
+    }
+} -result 1
+
+test 20-1.2 {adopted connection shares gate identity} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set gate1 [::oratcl::internal::connGateId $L]
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set gate2 [interp eval $child {::oratcl::internal::connGateId $L}]
+        interp delete $child
+        expr {$gate1 eq $gate2}
+    }
+} -result 1
+
+# ---- Adoption policy inheritance (MAJOR #8 fix) ----
+
+test 20-2.0 {adopted connection inherits owner's fetchArraySize} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L fetcharraysize 300
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set fas [interp eval $child {oraconfig $L fetcharraysize}]
+        interp delete $child
+        expr {$fas == 300}
+    }
+} -result 1
+
+test 20-2.1 {adopted connection inherits owner's inlineLobs} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L inlineLobs 1
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set il [interp eval $child {oraconfig $L inlineLobs}]
+        interp delete $child
+        expr {$il == 1}
+    }
+} -result 1
+
+# ---- Owner logoff, adopter continues ----
+
+test 20-3.0 {adopter can use connection after owner logoff} -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set child [interp create]
+    interp eval $child {package require oratcl 9.0}
+    interp eval $child [list set L $L]
+    # Adopter opens a handle to establish the shared connection
+    interp eval $child {set S [oraopen $L]; oraclose $S}
+    # Owner logs off
+    oralogoff $L
+    # Adopter should still be able to use the connection
+    set result [interp eval $child {
+        set S [oraopen $L]
+        oraparse $S {select 1 from dual}
+        oraexec $S
+        orafetch $S -datavariable row -indexbynumber
+        oraclose $S
+        oralogoff $L
+        lindex $row 0
+    }]
+    interp delete $child
+    set result
+} -result 1
+
+# ---- Multiple child interps ----
+
+test 20-4.0 {multiple children adopt same connection} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set results {}
+        for {set i 0} {$i < 3} {incr i} {
+            set c [interp create]
+            interp eval $c {package require oratcl 9.0}
+            interp eval $c [list set L $L]
+            lappend results [interp eval $c {
+                set S [oraopen $L]
+                oraparse $S {select 1 from dual}
+                oraexec $S
+                orafetch $S -datavariable r -indexbynumber
+                oraclose $S
+                oralogoff $L
+                lindex $r 0
+            }]
+            interp delete $c
+        }
+        set results
+    }
+} -result {1 1 1}
+
+# ---- Child interp deletion cleans up properly ----
+
+test 20-5.0 {child interp deletion with open handles is safe} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        interp eval $child {
+            set S [oraopen $L]
+            oraparse $S {select 1 from dual}
+            oraexec $S
+            # Deliberately don't close S or logoff L
+        }
+        # Deleting child should clean up without crash
+        interp delete $child
+        # Parent connection should still work
+        set S [oraopen $L]
+        oraclose $S
+        expr 1
+    }
+} -result 1
+
+cleanupTests

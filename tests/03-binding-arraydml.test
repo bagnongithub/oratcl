@@ -1,0 +1,99 @@
+# -*-Tcl-*-
+# 03-binding-arraydml.test — orabind, orabindexec, array DML
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# ---- orabind + oraexec ----
+
+test 03-1.0 {orabind scalar insert and verify} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER PRIMARY KEY, name VARCHAR2(50))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :name)"
+        orabind $S :id 10 :name "Ten"
+        oraexec $S -commit
+        oraclose $S
+        ::OratclTest::count_rows $L $T "id=10"
+    }
+} -result 1
+
+test 03-1.1 {orabind re-bind and re-exec on same handle} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, name VARCHAR2(50))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :name)"
+        orabind $S :id 1 :name "Alice"
+        oraexec $S
+        orabind $S :id 2 :name "Bob"
+        oraexec $S -commit
+        oraclose $S
+        ::OratclTest::count_rows $L $T
+    }
+} -result 2
+
+test 03-1.2 {orabind NULL value} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, name VARCHAR2(50))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :name)"
+        orabind $S :id 1 :name ""
+        oraexec $S -commit
+        oraclose $S
+        ::OratclTest::query_scalar $L "SELECT name FROM $T WHERE id=1"
+    }
+} -result {}
+
+# ---- orabindexec -arraydml ----
+
+test 03-2.0 {orabindexec -arraydml inserts multiple rows} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER PRIMARY KEY, name VARCHAR2(50))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :name)"
+        orabindexec $S -arraydml :id {1 2 3} :name {A B C} -commit
+        set rows [oramsg $S rows]
+        oraclose $S
+        set rows
+    }
+} -result 3
+
+test 03-2.1 {orabindexec -arraydml length mismatch error} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, name VARCHAR2(50))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :name)"
+        set rc [catch {orabindexec $S -arraydml :id {1 2} :name {A B C}} msg]
+        oraclose $S
+        list $rc [string match "*mismatch*" $msg]
+    }
+} -result {1 1}
+
+test 03-2.2 {orabindexec -arraydml large batch} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        set ids {}; set vals {}
+        for {set i 1} {$i <= 500} {incr i} {
+            lappend ids $i
+            lappend vals "v$i"
+        }
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :val)"
+        orabindexec $S -arraydml :id $ids :val $vals -commit
+        oraclose $S
+        ::OratclTest::count_rows $L $T
+    }
+} -result 500
+
+test 03-2.3 {orabindexec without -arraydml} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :val)"
+        orabindexec $S :id 1 :val hello -commit
+        oraclose $S
+        ::OratclTest::count_rows $L $T
+    }
+} -result 1
+
+cleanupTests

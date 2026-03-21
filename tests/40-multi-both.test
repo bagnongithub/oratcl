@@ -1,0 +1,105 @@
+# -*-Tcl-*-
+# 40-multi-both.test — multi-interp + multi-thread combinations
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 40-1.0 {each thread creates child interp and uses oratcl} \
+    -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 5} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    set i1 [interp create]
+                    interp eval $i1 {package require oratcl 9.0}
+                    interp eval $i1 [list set ::env(ORATCL_CONNECT) $::env(ORATCL_CONNECT)]
+                    interp eval $i1 {
+                        set L [oralogon $::env(ORATCL_CONNECT)]
+                        set S [oraopen $L]
+                        oraparse $S {select 1 from dual}
+                        oraexec $S
+                        oraclose $S
+                        oralogoff $L
+                    }
+                    interp delete $i1
+                    set _rc 0
+                } finally {
+                    thread::exit $_rc
+                }
+            }
+        }
+    }
+    set ok 1
+    foreach tid $tids {
+        if {[thread::join $tid] ne "0"} {set ok 0}
+    }
+    set ok
+} -result 1
+
+test 40-1.1 {adopted connection shares gate across threads} \
+    -constraints {have_connect have_thread} -body {
+    ::OratclTest::with_connection L {
+        set gate1 [::oratcl::internal::connGateId $L]
+
+        set tid [thread::create -joinable -preserved]
+        thread::send $tid [list set ::auto_path $::auto_path]
+        thread::send $tid [list set ::L $L]
+
+        set gateReply {}
+        thread::send -async $tid {
+            set rc [catch {
+                package require oratcl 9.0
+                ::oratcl::internal::connGateId $::L
+            } msg opts]
+            list $rc $msg
+        } gateReply
+
+        vwait gateReply
+        lassign $gateReply rc gate2
+
+        thread::release $tid
+        thread::join $tid
+
+        if {$rc != 0} { error $gate2 }
+        expr {$gate1 eq $gate2}
+    }
+} -result 1
+
+test 40-1.2 {adopted connection usable from worker thread} \
+    -constraints {have_connect have_thread} -body {
+    ::OratclTest::with_connection L {
+        set tid [thread::create -joinable -preserved]
+        thread::send $tid [list set ::auto_path $::auto_path]
+        thread::send $tid [list set ::L $L]
+
+        set result {}
+        thread::send -async $tid {
+            set rc [catch {
+                package require oratcl 9.0
+                set S [oraopen $::L]
+                oraparse $S {select 42 from dual}
+                oraexec $S
+                orafetch $S -datavariable row -indexbynumber
+                oraclose $S
+                oralogoff $::L
+                lindex $row 0
+            } msg]
+            list $rc $msg
+        } result
+
+        vwait result
+        lassign $result rc val
+        thread::release $tid
+        thread::join $tid
+
+        if {$rc != 0} { error $val }
+        set val
+    }
+} -result 42
+
+cleanupTests

@@ -1,0 +1,137 @@
+# -*-Tcl-*-
+# 06-oramsg.test — oramsg diagnostic fields
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# ---- After success ----
+
+test 06-1.0 {oramsg rc is 0 after success} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S "SELECT 1 FROM DUAL"
+        set rc [oramsg $S rc]
+        oraclose $S
+        set rc
+    }
+} -result 0
+
+test 06-1.1 {oramsg rows after DML} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 5
+        set S [oraopen $L]
+        orasql $S "DELETE FROM $T WHERE id <= 3" -commit
+        set rows [oramsg $S rows]
+        oraclose $S
+        set rows
+    }
+} -result 3
+
+test 06-1.2 {oramsg rows is 0 for zero-row DML} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER)"]
+        set S [oraopen $L]
+        orasql $S "DELETE FROM $T WHERE id = 99999"
+        set rows [oramsg $S rows]
+        oraclose $S
+        set rows
+    }
+} -result 0
+
+test 06-1.3 {oramsg warning field} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S "SELECT 1 FROM DUAL"
+        set w [oramsg $S warning]
+        oraclose $S
+        expr {$w == 0}
+    }
+} -result 1
+
+# ---- After error ----
+
+test 06-2.0 {oramsg after execution error records nonzero rc and error text} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        # Use an execution error (referencing nonexistent table) rather than
+        # a parse error, since oramsg reads the per-handle OradpiMsg which
+        # is populated by exec/fetch failures, not parse-time failures.
+        catch {orasql $S "SELECT * FROM oratcl9_nonexistent_table_xyz"}
+        set rc   [oramsg $S rc]
+        set err  [oramsg $S error]
+        set code [oramsg $S ocicode]
+        oraclose $S
+        list [expr {$rc != 0}] [expr {[string length $err] > 0}] [expr {$code != 0}]
+    }
+} -result {1 1 1}
+
+# ---- All oramsg fields are readable ----
+
+test 06-3.0 {every oramsg field is readable without error} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S "SELECT 1 FROM DUAL"
+        set ok 1
+        foreach field {rc error rows peo ocicode sqltype fn action sqlstate recoverable warning offset} {
+            if {[catch {oramsg $S $field} result]} {
+                set ok 0
+                break
+            }
+        }
+        oraclose $S
+        set ok
+    }
+} -result 1
+
+test 06-3.1 {oramsg all returns a list of key-value pairs} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S "SELECT 1 FROM DUAL"
+        set all [oramsg $S all]
+        oraclose $S
+        # Should be a non-empty even-length list (key-value pairs)
+        expr {[llength $all] > 0 && [llength $all] % 2 == 0}
+    }
+} -result 1
+
+test 06-3.2 {oramsg sqltype after SELECT} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S "SELECT 1 FROM DUAL"
+        set t [oramsg $S sqltype]
+        oraclose $S
+        # sqltype returns the numeric DPI statement type code
+        # DPI_STMT_TYPE_SELECT = 1
+        expr {$t == 1}
+    }
+} -result 1
+
+# ---- oramsg rows after async success ----
+
+test 06-4.0 {oramsg rows after oraexecasync/orawaitasync} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 4
+        set S [oraopen $L]
+        oraparse $S "DELETE FROM $T"
+        oraexecasync $S -commit
+        set wrc [orawaitasync $S]
+        set rows [oramsg $S rows]
+        oraclose $S
+        list $wrc [expr {$rows == 4}]
+    }
+} -result {0 1}
+
+# ---- Error: invalid field name ----
+
+test 06-5.0 {oramsg rejects unknown field} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        set rc [catch {oramsg $S bogusfield} msg]
+        oraclose $S
+        expr {$rc == 1}
+    }
+} -result 1
+
+cleanupTests

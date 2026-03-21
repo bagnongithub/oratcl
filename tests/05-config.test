@@ -1,0 +1,206 @@
+# -*-Tcl-*-
+# 05-config.test — oraconfig on connection and statement handles
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# ---- Connection config listing ----
+
+test 05-1.0 {oraconfig listing returns all known keys} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set all [oraconfig $L]
+        set keys {}
+        for {set i 0} {$i < [llength $all]} {incr i 2} {
+            lappend keys [lindex $all $i]
+        }
+        foreach needed {stmtcachesize fetcharraysize prefetchrows calltimeout inlineLobs
+                        foMaxAttempts foBackoffMs foBackoffFactor foErrorClasses
+                        foDebounceMs failovercallback} {
+            if {$needed ni $keys} {
+                error "missing key: $needed"
+            }
+        }
+        expr 1
+    }
+} -result 1
+
+# ---- Connection config getters ----
+
+test 05-2.0 {stmtcachesize readable} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        expr {[oraconfig $L stmtcachesize] >= 0}
+    }
+} -result 1
+
+test 05-2.1 {fetcharraysize readable and >= 1} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        expr {[oraconfig $L fetcharraysize] >= 1}
+    }
+} -result 1
+
+test 05-2.2 {prefetchrows readable} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        expr {[oraconfig $L prefetchrows] >= 0}
+    }
+} -result 1
+
+# ---- Connection config setters ----
+
+test 05-3.0 {calltimeout set and get} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L calltimeout 5000
+        oraconfig $L calltimeout
+    }
+} -result 5000
+
+test 05-3.1 {inlineLobs set and get} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L inlineLobs 1
+        set v1 [oraconfig $L inlineLobs]
+        oraconfig $L inlineLobs 0
+        set v0 [oraconfig $L inlineLobs]
+        list $v1 $v0
+    }
+} -result {1 0}
+
+test 05-3.2 {foMaxAttempts set and get} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L foMaxAttempts 3
+        oraconfig $L foMaxAttempts
+    }
+} -result 3
+
+test 05-3.3 {foBackoffMs set and get} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L foBackoffMs 200
+        oraconfig $L foBackoffMs
+    }
+} -result 200
+
+test 05-3.4 {foBackoffFactor set and get} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L foBackoffFactor 2.0
+        oraconfig $L foBackoffFactor
+    }
+} -result 2.0
+
+test 05-3.5 {foErrorClasses set and get} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L foErrorClasses {network connlost}
+        set v [oraconfig $L foErrorClasses]
+        lsort $v
+    }
+} -result {connlost network}
+
+test 05-3.6 {foDebounceMs set and get} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L foDebounceMs 500
+        oraconfig $L foDebounceMs
+    }
+} -result 500
+
+test 05-3.7 {failovercallback set and get via oraconfig} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L failovercallback myProc
+        set v1 [oraconfig $L failovercallback]
+        oraconfig $L failovercallback ""
+        set v2 [oraconfig $L failovercallback]
+        list $v1 $v2
+    }
+} -result {myProc {}}
+
+test 05-3.8 {multi-key set in single oraconfig call} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L calltimeout 1234 inlineLobs 1 foMaxAttempts 5
+        list [oraconfig $L calltimeout] [oraconfig $L inlineLobs] [oraconfig $L foMaxAttempts]
+    }
+} -result {1234 1 5}
+
+# ---- Connection config errors ----
+
+test 05-4.0 {fetchrows rejects zero} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        set rc [catch {oraconfig $S fetchrows 0} msg]
+        oraclose $S
+        list $rc [string match "*must be >= 1*" $msg]
+    }
+} -result {1 1}
+
+test 05-4.1 {calltimeout rejects uint32 overflow} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set rc [catch {oraconfig $L calltimeout 4294967296} msg]
+        list $rc [string match "*exceeds uint32 range*" $msg]
+    }
+} -result {1 1}
+
+test 05-4.2 {foErrorClasses rejects unknown values} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set rc [catch {oraconfig $L foErrorClasses {network mystery}} msg]
+        list $rc [string match "*unknown foErrorClasses value*" $msg]
+    }
+} -result {1 1}
+
+test 05-4.3 {unknown config key rejected} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set rc [catch {oraconfig $L boguskey} msg]
+        list $rc [string match "*bad option*" $msg]
+    }
+} -result {1 1}
+
+test 05-4.4 {prefetchmemory no longer valid} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set rc [catch {oraconfig $L prefetchmemory} msg]
+        list $rc [string match "*bad option*" $msg]
+    }
+} -result {1 1}
+
+# ---- Statement config ----
+
+test 05-5.0 {statement fetchrows/prefetchrows} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraconfig $S fetchrows 50
+        oraconfig $S prefetchrows 20
+        set result [list [oraconfig $S fetchrows] [oraconfig $S prefetchrows]]
+        oraclose $S
+        set result
+    }
+} -result {50 20}
+
+test 05-5.1 {new statement inherits connection fetchArraySize} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L fetcharraysize 200
+        set S [oraopen $L]
+        set fas [oraconfig $S fetchrows]
+        oraclose $S
+        expr {$fas == 200}
+    }
+} -result 1
+
+test 05-5.2 {statement fetchrows overrides connection default} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L fetcharraysize 200
+        set S [oraopen $L]
+        oraconfig $S fetchrows 50
+        set fas [oraconfig $S fetchrows]
+        oraclose $S
+        expr {$fas == 50}
+    }
+} -result 1
+
+test 05-5.3 {statement config listing} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        set all [oraconfig $S]
+        oraclose $S
+        # Should contain fetchrows and prefetchrows
+        set keys {}
+        for {set i 0} {$i < [llength $all]} {incr i 2} {
+            lappend keys [lindex $all $i]
+        }
+        expr {"fetchrows" in $keys && "prefetchrows" in $keys}
+    }
+} -result 1
+
+cleanupTests

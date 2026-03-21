@@ -1,0 +1,65 @@
+# -*-Tcl-*-
+# 04-transactions.test — commit, rollback, autocommit
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 04-1.0 {explicit oracommit} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        set S [oraopen $L]
+        orasql $S "INSERT INTO $T VALUES (1, 'X')"
+        oracommit $L
+        oraclose $S
+        ::OratclTest::count_rows $L $T "id=1"
+    }
+} -result 1
+
+test 04-1.1 {orarollback discards uncommitted DML} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        set S [oraopen $L]
+        orasql $S "INSERT INTO $T VALUES (1, 'X')"
+        orarollback $L
+        oraclose $S
+        ::OratclTest::count_rows $L $T
+    }
+} -result 0
+
+test 04-1.2 {oraautocommit on causes auto-commit} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        oraautocommit $L 1
+        set S [oraopen $L]
+        orasql $S "INSERT INTO $T VALUES (1, 'A')"
+        oraclose $S
+        # Rollback should have no effect since autocommit already committed
+        orarollback $L
+        ::OratclTest::count_rows $L $T "id=1"
+    }
+} -result 1
+
+test 04-1.3 {oraexec -commit flag} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (1, 'Z')"
+        oraexec $S -commit
+        oraclose $S
+        ::OratclTest::count_rows $L $T
+    }
+} -result 1
+
+test 04-1.4 {oracommit on invalid handle errors} -body {
+    package require oratcl 9.0
+    catch {oracommit bogus_handle} msg
+    string match "*invalid*" $msg
+} -result 1
+
+test 04-1.5 {orarollback on invalid handle errors} -body {
+    package require oratcl 9.0
+    catch {orarollback bogus_handle} msg
+    string match "*invalid*" $msg
+} -result 1
+
+cleanupTests

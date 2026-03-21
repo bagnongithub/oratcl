@@ -1,0 +1,143 @@
+# -*-Tcl-*-
+# 00-setup.test — test harness bootstrap for Oratcl 9.0 (ODPI) — tcltest 2.5
+# Assumptions:
+#   - ORATCL_CONNECT env var contains a valid connect string (user/pw@host/service)
+#   - The package "oratcl" (this repo's module) is locatable via auto_path or TCLLIBPATH
+
+package require tcltest 2.5
+namespace import ::tcltest::*
+
+# Try to help the runner find the just-built package if we're inside the source tree.
+set ::_oratcl_tests(dir) [file normalize [file dirname [info script]]]
+set ::_oratcl_tests(root) [file normalize [file dirname [file dirname $_oratcl_tests(dir)]]]
+foreach cand [list $_oratcl_tests(root) [file join $_oratcl_tests(root) lib] [file join $_oratcl_tests(root) generic]] {
+    if {[file exists [file join $cand pkgIndex.tcl]]} {
+        if {$cand ni $::auto_path} {
+            lappend ::auto_path $cand
+        }
+    }
+}
+
+# Constraints
+testConstraint have_thread   [expr {![catch {package require Thread}]}]
+testConstraint posix         [expr {$::tcl_platform(platform) eq "unix"}]
+testConstraint have_connect  [expr {[info exists ::env(ORATCL_CONNECT)] && $::env(ORATCL_CONNECT) ne ""}]
+testConstraint memory        1
+
+namespace eval ::OratclTest {
+    variable connstr
+    if {[info exists ::env(ORATCL_CONNECT)]} {
+        set connstr $::env(ORATCL_CONNECT)
+    } else {
+        set connstr ""
+    }
+
+    # Track tables created during tests for cleanup
+    variable _created_tables [list]
+
+    proc connstr {} { variable connstr; return $connstr }
+
+    # Create/destroy a logon around a body. Exposes L in the caller via upvar.
+    proc with_connection {varName body} {
+        upvar 1 $varName L
+        set cs [::OratclTest::connstr]
+        if {$cs eq ""} {
+            return -code SKIP "ORATCL_CONNECT not set"
+        }
+        package require oratcl 9.0
+        set L [oralogon $cs]
+        set rc [catch {uplevel 1 $body} res opts]
+        # Best effort cleanup of any tracked tables
+        cleanup_tables $L
+        # Best effort logoff
+        catch {oralogoff $L}
+        if {$rc} {return -options $opts $res}
+        return $res
+    }
+
+    # A very plain SQL runner (DDL/DML). Uses oraopen/orasql, closes the stmt.
+    proc run_sql {L sql} {
+        set S [oraopen $L]
+        set rc [catch {orasql $S $sql -commit} res opts]
+        catch {oraclose $S}
+        if {$rc} {return -options $opts $res}
+        return $res
+    }
+
+    # Unique object name (uppercased) using PID and an incrementing counter.
+    variable _seq 0
+    proc uniq {base} {
+        variable _seq
+        incr _seq
+        return [string toupper "${base}_[pid]_${_seq}"]
+    }
+
+    # Create a table and register it for automatic cleanup
+    proc mk_table {L ddl_suffix {prefix oratcl9_t}} {
+        variable _created_tables
+        set T [uniq $prefix]
+        catch {run_sql $L "DROP TABLE $T PURGE"}
+        run_sql $L "CREATE TABLE $T $ddl_suffix"
+        lappend _created_tables $T
+        return $T
+    }
+
+    # Clean up all tracked tables
+    proc cleanup_tables {L} {
+        variable _created_tables
+        foreach T $_created_tables {
+            catch {run_sql $L "DROP TABLE $T PURGE"}
+        }
+        set _created_tables [list]
+    }
+
+    # Query a scalar value
+    proc query_scalar {L sql} {
+        set S [oraopen $L]
+        oraparse $S $sql
+        oraexec $S
+        set rc [orafetch $S -datavariable row -indexbynumber]
+        set val [lindex $row 0]
+        oraclose $S
+        return $val
+    }
+
+    # Count rows in a table
+    proc count_rows {L tbl {where ""}} {
+        if {$where ne ""} {
+            return [query_scalar $L "SELECT COUNT(*) FROM $tbl WHERE $where"]
+        }
+        return [query_scalar $L "SELECT COUNT(*) FROM $tbl"]
+    }
+
+    # Insert N rows into a simple (id NUMBER, val VARCHAR2) table
+    proc insert_rows {L T n {commit 1}} {
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T (id, val) VALUES (:id, :val)"
+        for {set i 1} {$i <= $n} {incr i} {
+            orabind $S :id $i :val "row_$i"
+            oraexec $S
+        }
+        if {$commit} { oracommit $L }
+        oraclose $S
+    }
+
+    # Elapsed-time helper: returns {result elapsed_ms}
+    proc timed {body} {
+        set t0 [clock milliseconds]
+        set rc [catch {uplevel 1 $body} res opts]
+        set elapsed [expr {[clock milliseconds] - $t0}]
+        if {$rc} {return -options $opts $res}
+        return [list $res $elapsed]
+    }
+}
+
+# Smoke: can we load the package at all?
+test 00-0.1 {package loads} -body {
+    package require oratcl 9.0
+} -result 9.0
+
+# If no connect string, skip the rest of DB-dependent files (they still load).
+test 00-0.2 {connect string present} -constraints {have_connect} -body {
+    expr {[string length [::OratclTest::connstr]] > 0}
+} -result 1
