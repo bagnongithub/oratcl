@@ -102,10 +102,11 @@ static void FreeFetchMeta(OradpiFetchColMeta* meta, Tcl_Size n)
     Tcl_Free((char*)meta);
 }
 
-static void FreeFetchCells(OradpiFetchCell* cells, Tcl_Size n)
+static void FreeFetchCells(OradpiFetchCell* cells, Tcl_Size n, GlobalConnRec* shared)
 {
     if (!cells)
         return;
+    int gated = 0;
     for (Tcl_Size i = 0; i < n; i++)
     {
         if (cells[i].bytes)
@@ -116,10 +117,17 @@ static void FreeFetchCells(OradpiFetchCell* cells, Tcl_Size n)
         cells[i].bytesLen = 0;
         if (cells[i].lob)
         {
+            if (!gated)
+            {
+                Oradpi_SharedConnGateEnter(shared);
+                gated = 1;
+            }
             dpiLob_release(cells[i].lob);
             cells[i].lob = NULL;
         }
     }
+    if (gated)
+        Oradpi_SharedConnGateLeave(shared);
 }
 
 static int SnapshotColumnMeta(Tcl_Interp* ip, OradpiStmt* st, uint32_t numCols, OradpiFetchColMeta* meta)
@@ -360,7 +368,7 @@ static Tcl_Obj* SnapshotCellToObj(Tcl_Interp* ip, OradpiStmt* st, OradpiFetchCel
         case DPI_NATIVE_TYPE_LOB:
             if (cell->lob)
             {
-                OradpiLob* L = Oradpi_NewLob(ip, cell->lob);
+                OradpiLob* L = Oradpi_NewLob(ip, cell->lob, st->owner ? st->owner->shared : NULL);
                 cell->lob = NULL; /* ownership transferred to the wrapper */
                 return L->base.name;
             }
@@ -618,7 +626,7 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         const char* snapshotMsg = NULL;
 
         memset(colVals, 0, colValBytes);
-        FreeFetchCells(cells, numColsSize);
+        FreeFetchCells(cells, numColsSize, st->owner ? st->owner->shared : NULL);
         memset(cells, 0, cellBytes);
 
         CONN_GATE_ENTER(st->owner);
@@ -803,7 +811,7 @@ cleanup:
     }
     if (cells)
     {
-        FreeFetchCells(cells, numColsSize);
+        FreeFetchCells(cells, numColsSize, st->owner ? st->owner->shared : NULL);
         Tcl_Free((char*)cells);
     }
     FreeFetchMeta(meta, numColsSize);

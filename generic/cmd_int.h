@@ -206,6 +206,13 @@ static inline int Oradpi_CheckedAllocBytes(Tcl_Interp* ip, Tcl_Size count, size_
     return TCL_OK;
 }
 
+/* C-1 fix: Finite timeout (ms) for teardown waits.  30 seconds gives the
+ * Oracle server a generous window to respond to dpiConn_breakExecution
+ * before we give up and let the worker self-clean via the orphan mechanism. */
+#ifndef ORADPI_TEARDOWN_TIMEOUT_MS
+#define ORADPI_TEARDOWN_TIMEOUT_MS 30000
+#endif
+
 #define CONN_GATE_ENTER(co) Oradpi_ConnGateEnter((co))
 #define CONN_GATE_ENTER_TIMED(co, timeoutMs) Oradpi_ConnGateEnterTimed((co), (timeoutMs))
 #define CONN_GATE_LEAVE(co) Oradpi_ConnGateLeave((co))
@@ -226,7 +233,7 @@ OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool);
 OradpiConn* Oradpi_LookupConn(Tcl_Interp* ip, Tcl_Obj* nameObj);
 OradpiStmt* Oradpi_NewStmt(Tcl_Interp* ip, OradpiConn* co);
 OradpiStmt* Oradpi_LookupStmt(Tcl_Interp* ip, Tcl_Obj* nameObj);
-OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob);
+OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob, GlobalConnRec* shared);
 void Oradpi_FreeConn(OradpiConn* co);
 void Oradpi_FreeStmt(Tcl_Interp* ip, OradpiStmt* s);
 void Oradpi_FreeLob(OradpiLob* l);

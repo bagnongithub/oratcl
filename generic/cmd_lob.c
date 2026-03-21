@@ -53,7 +53,9 @@ enum LobReadOptIdx
  *   inlineLobs is disabled.
  *   Returns: size (size), byte data (read), 0 (write/trim/close).
  *   Errors:  ODPI-C LOB errors; invalid handle; excessive read size (256 MB cap).
- *   Thread-safety: safe — per-interp LOB registry.
+ *   Thread-safety: safe — all ODPI LOB calls are serialized via the shared
+ *   per-dpiConn gate (l->shared), ensuring correct behavior under
+ *   cross-interp adoption.
  */
 int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
 {
@@ -77,7 +79,10 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
         case LOB_SIZE:
         {
             uint64_t sz = 0;
-            if (dpiLob_getSize(l->lob, &sz) != DPI_SUCCESS)
+            Oradpi_SharedConnGateEnter(l->shared);
+            int ok = dpiLob_getSize(l->lob, &sz);
+            Oradpi_SharedConnGateLeave(l->shared);
+            if (ok != DPI_SUCCESS)
                 return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_getSize");
             Tcl_SetObjResult(ip, Tcl_NewWideIntObj((Tcl_WideInt)sz));
             return TCL_OK;
@@ -114,7 +119,10 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             }
             if (amount == 0)
             {
-                if (dpiLob_getSize(l->lob, &lobSize) != DPI_SUCCESS)
+                Oradpi_SharedConnGateEnter(l->shared);
+                int ok = dpiLob_getSize(l->lob, &lobSize);
+                Oradpi_SharedConnGateLeave(l->shared);
+                if (ok != DPI_SUCCESS)
                     return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_getSize");
                 if (lobSize >= offset)
                     amount = lobSize - offset + 1;
@@ -126,7 +134,10 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
             }
 
             uint64_t capBytes = 0;
-            if (dpiLob_getBufferSize(l->lob, amount, &capBytes) != DPI_SUCCESS)
+            Oradpi_SharedConnGateEnter(l->shared);
+            int bufOk = dpiLob_getBufferSize(l->lob, amount, &capBytes);
+            Oradpi_SharedConnGateLeave(l->shared);
+            if (bufOk != DPI_SUCCESS)
                 return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_getBufferSize");
 
             /* Guard against excessive allocations (default cap: 256 MB) */
@@ -145,7 +156,10 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
                 return TCL_ERROR;
             char* buf = (char*)Tcl_Alloc(bufBytes);
             uint64_t gotBytes = capBytes;
-            if (dpiLob_readBytes(l->lob, offset, amount, buf, &gotBytes) != DPI_SUCCESS)
+            Oradpi_SharedConnGateEnter(l->shared);
+            int readOk = dpiLob_readBytes(l->lob, offset, amount, buf, &gotBytes);
+            Oradpi_SharedConnGateLeave(l->shared);
+            if (readOk != DPI_SUCCESS)
             {
                 Tcl_Free(buf);
                 return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_readBytes");
@@ -179,8 +193,14 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
                 else
                     return Oradpi_SetError(ip, (OradpiBase*)l, -1, "unknown option, expected -offset");
             }
-            if (bl > 0 && dpiLob_writeBytes(l->lob, offset, (const char*)bv, (uint64_t)bl) != DPI_SUCCESS)
-                return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_writeBytes");
+            if (bl > 0)
+            {
+                Oradpi_SharedConnGateEnter(l->shared);
+                int wok = dpiLob_writeBytes(l->lob, offset, (const char*)bv, (uint64_t)bl);
+                Oradpi_SharedConnGateLeave(l->shared);
+                if (wok != DPI_SUCCESS)
+                    return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_writeBytes");
+            }
             Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
             return TCL_OK;
         }
@@ -196,7 +216,10 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
                 return TCL_ERROR;
             if (w < 0)
                 return Oradpi_SetError(ip, (OradpiBase*)l, -1, "oralob trim: newSize must be >= 0");
-            if (dpiLob_trim(l->lob, (uint64_t)w) != DPI_SUCCESS)
+            Oradpi_SharedConnGateEnter(l->shared);
+            int tok = dpiLob_trim(l->lob, (uint64_t)w);
+            Oradpi_SharedConnGateLeave(l->shared);
+            if (tok != DPI_SUCCESS)
                 return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)l, "dpiLob_trim");
             Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
             return TCL_OK;
@@ -204,7 +227,7 @@ int Oradpi_Cmd_Lob(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[
         case LOB_CLOSE:
         {
             /* Remove from interp hash table first, then delegate to Oradpi_FreeLob
-             * which handles dpiLob_close, dpiLob_release, name, msg, and Tcl_Free. */
+             * which handles gated dpiLob_close, dpiLob_release, name, msg, and Tcl_Free. */
             OradpiInterpState* st = (OradpiInterpState*)Tcl_GetAssocData(ip, "oradpi", NULL);
             if (st && l->base.name)
             {

@@ -133,6 +133,7 @@ typedef struct OradpiLob
 {
     OradpiBase base;
     dpiLob* lob;
+    GlobalConnRec* shared; /* shared per-dpiConn gate for serializing LOB I/O */
 } OradpiLob;
 
 typedef struct OradpiInterpState

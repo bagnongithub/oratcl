@@ -39,7 +39,7 @@ OradpiConn* Oradpi_LookupConn(Tcl_Interp* ip, Tcl_Obj* nameObj);
 OradpiLob* Oradpi_LookupLob(Tcl_Interp* ip, Tcl_Obj* nameObj);
 OradpiStmt* Oradpi_LookupStmt(Tcl_Interp* ip, Tcl_Obj* nameObj);
 OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool);
-OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob);
+OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob, GlobalConnRec* shared);
 OradpiStmt* Oradpi_NewStmt(Tcl_Interp* ip, OradpiConn* co);
 static void Oradpi_RegisterConnInInterp(OradpiInterpState* st, OradpiConn* co);
 
@@ -419,9 +419,17 @@ void Oradpi_FreeConn(OradpiConn* co)
         if (co->ownerClose)
         {
             GlobalConn_MarkOwnerGone(shared); /* block further adoptions */
-            Oradpi_SharedConnGateEnter(shared);
-            dpiConn_close(co->conn, DPI_MODE_CONN_CLOSE_DEFAULT, NULL, 0);
-            Oradpi_SharedConnGateLeave(shared);
+            /* Use timed gate to avoid infinite hang if a worker still holds
+             * the gate.  On timeout: skip dpiConn_close — the handle will
+             * be released below via dpiConn_release, and any stuck worker
+             * holds its own addRef'd handle. */
+            if (Oradpi_SharedConnGateEnterTimed(shared, ORADPI_TEARDOWN_TIMEOUT_MS))
+            {
+                dpiConn_close(co->conn, DPI_MODE_CONN_CLOSE_DEFAULT, NULL, 0);
+                Oradpi_SharedConnGateLeave(shared);
+            }
+            /* else: timed gate failed — detach without close; worker will
+             * release its addRef'd handle when it eventually returns. */
         }
         dpiConn_release(co->conn);
         co->conn = NULL;
@@ -463,12 +471,24 @@ void Oradpi_FreeStmt(Tcl_Interp* ip, OradpiStmt* s)
          * On timeout, we proceed with cleanup; the worker's own addRef'd
          * handles will be released when it eventually returns. */
         (void)Oradpi_StmtWaitForAsync(s, 1 /*cancel*/, 30000 /*30s timeout*/);
-        if (s->owner)
-            CONN_GATE_ENTER(s->owner);
-        dpiStmt_close(s->stmt, NULL, 0);
-        dpiStmt_release(s->stmt);
-        if (s->owner)
+        /* Use timed gate to avoid infinite hang if a worker still holds the
+         * gate (e.g. breakExecution failed to interrupt a stuck OCI call).
+         * On timeout: detach wrapper without calling dpiStmt_close/release —
+         * the worker holds its own addRef'd handles and will clean up when
+         * it eventually returns. */
+        if (s->owner && CONN_GATE_ENTER_TIMED(s->owner, ORADPI_TEARDOWN_TIMEOUT_MS))
+        {
+            dpiStmt_close(s->stmt, NULL, 0);
+            dpiStmt_release(s->stmt);
             CONN_GATE_LEAVE(s->owner);
+        }
+        else if (!s->owner)
+        {
+            /* No owner connection (orphan stmt) — close ungated */
+            dpiStmt_close(s->stmt, NULL, 0);
+            dpiStmt_release(s->stmt);
+        }
+        /* else: timed gate failed — detach; worker will release its addRef'd handle */
         s->stmt = NULL;
     }
     s->owner = NULL;
@@ -508,10 +528,13 @@ void Oradpi_FreeLob(OradpiLob* l)
 {
     if (!l)
         return;
+    GlobalConnRec* shared = l->shared;
     if (l->lob)
     {
+        Oradpi_SharedConnGateEnter(shared);
         dpiLob_close(l->lob);
         dpiLob_release(l->lob);
+        Oradpi_SharedConnGateLeave(shared);
         l->lob = NULL;
     }
     if (l->base.name)
@@ -520,6 +543,8 @@ void Oradpi_FreeLob(OradpiLob* l)
         l->base.name = NULL;
     }
     Oradpi_FreeMsg(&l->base.msg);
+    l->shared = NULL;
+    Oradpi_SharedConnRelease(shared);
     Tcl_Free((char*)l);
 }
 
@@ -711,7 +736,7 @@ OradpiStmt* Oradpi_LookupStmt(Tcl_Interp* ip, Tcl_Obj* nameObj)
     return e ? (OradpiStmt*)Tcl_GetHashValue(e) : NULL;
 }
 
-OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob)
+OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob, GlobalConnRec* shared)
 {
     OradpiInterpState* st = Oradpi_Get(ip);
     OradpiLob* l = (OradpiLob*)Tcl_Alloc(sizeof(*l));
@@ -719,6 +744,8 @@ OradpiLob* Oradpi_NewLob(Tcl_Interp* ip, dpiLob* lob)
     l->base.name = Oradpi_NewHandleName(ip, "oraB");
     Tcl_IncrRefCount(l->base.name);
     l->lob = lob;
+    l->shared = shared;
+    Oradpi_SharedConnAddRef(shared);
     int newEntry;
     Tcl_HashEntry* e = Tcl_CreateHashEntry(&st->lobs, Tcl_GetString(l->base.name), &newEntry);
     Tcl_SetHashValue(e, l);

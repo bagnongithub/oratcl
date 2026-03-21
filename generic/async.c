@@ -20,7 +20,6 @@
  */
 
 #include <limits.h>
-#include <stdlib.h>
 #include <string.h>
 #ifndef USE_TCL_STUBS
 #define USE_TCL_STUBS
@@ -87,14 +86,14 @@ typedef struct OradpiThreadPool
     Tcl_Size nThreads;
     int shutdown;
     int started;
+
+    /* Best-effort shutdown: workers decrement liveWorkers before exiting
+     * and signal exitCond so the exit handler can do a bounded wait. */
+    int liveWorkers;
+    Tcl_Condition exitCond;
 } OradpiThreadPool;
 
 #define ORADPI_DEFAULT_POOL_SIZE 4
-
-/* C-1 fix: Finite timeout (ms) for teardown waits.  30 seconds gives the
- * Oracle server a generous window to respond to dpiConn_breakExecution
- * before we give up and let the worker self-clean via the orphan mechanism. */
-#define ORADPI_TEARDOWN_TIMEOUT_MS 30000
 
 /* =========================================================================
  * Forward Declarations
@@ -290,6 +289,13 @@ static void PoolThreadProc(void* cd)
         AsyncWorkerBody(key);
         Tcl_Free(key);
     }
+
+    /* Signal the exit handler that this worker is done */
+    Tcl_MutexLock(&gPool.queueMutex);
+    if (gPool.liveWorkers > 0)
+        gPool.liveWorkers--;
+    Tcl_ConditionNotify(&gPool.exitCond);
+    Tcl_MutexUnlock(&gPool.queueMutex);
 }
 
 static void PoolEnsure(void)
@@ -332,6 +338,7 @@ static void PoolEnsure(void)
         return;
     }
     gPool.started = 1;
+    gPool.liveWorkers = (int)gPool.nThreads;
     gPoolInited = 1;
     Tcl_CreateExitHandler(PoolExitHandler, NULL);
     Tcl_MutexUnlock(&gPoolInitMutex);
@@ -421,18 +428,45 @@ static void PoolExitHandler(void* unused)
         Tcl_ConditionNotify(&gPool.queueCond);
     Tcl_MutexUnlock(&gPool.queueMutex);
 
-    int allJoined = 1;
-    for (Tcl_Size i = 0; i < nThreads; i++)
+    /* Best-effort bounded wait: give workers up to ORADPI_TEARDOWN_TIMEOUT_MS
+     * to exit.  If a worker is stuck in an OCI call that breakExecution could
+     * not interrupt, we skip joining it rather than blocking process exit
+     * indefinitely. */
+    Tcl_Time deadline;
+    Tcl_GetTime(&deadline);
+    deadline.sec += ORADPI_TEARDOWN_TIMEOUT_MS / 1000;
+    deadline.usec += (ORADPI_TEARDOWN_TIMEOUT_MS % 1000) * 1000;
+    while (deadline.usec >= 1000000)
     {
-        if (gPool.threads[i])
-        {
-            if (Tcl_JoinThread(gPool.threads[i], NULL) != TCL_OK)
-                allJoined = 0;
-        }
+        deadline.sec++;
+        deadline.usec -= 1000000;
     }
 
-    if (!allJoined)
-        return;
+    Tcl_MutexLock(&gPool.queueMutex);
+    while (gPool.liveWorkers > 0)
+    {
+        Tcl_ConditionWait(&gPool.exitCond, &gPool.queueMutex, &deadline);
+        if (gPool.liveWorkers == 0)
+            break;
+        Tcl_Time now;
+        Tcl_GetTime(&now);
+        if (now.sec > deadline.sec || (now.sec == deadline.sec && now.usec >= deadline.usec))
+            break; /* timeout — stuck workers will be killed by process exit */
+    }
+    int remaining = gPool.liveWorkers;
+    Tcl_MutexUnlock(&gPool.queueMutex);
+
+    /* Only attempt Tcl_JoinThread for workers that have actually exited.
+     * If any are still stuck, skip joining them — process exit will
+     * terminate them. */
+    if (remaining == 0)
+    {
+        for (Tcl_Size i = 0; i < nThreads; i++)
+        {
+            if (gPool.threads[i])
+                (void)Tcl_JoinThread(gPool.threads[i], NULL);
+        }
+    }
 
     Tcl_MutexLock(&gPool.queueMutex);
     while (gPool.head)
@@ -445,8 +479,14 @@ static void PoolExitHandler(void* unused)
     }
     Tcl_MutexUnlock(&gPool.queueMutex);
 
-    Tcl_ConditionFinalize(&gPool.queueCond);
-    Tcl_MutexFinalize(&gPool.queueMutex);
+    if (remaining == 0)
+    {
+        Tcl_ConditionFinalize(&gPool.exitCond);
+        Tcl_ConditionFinalize(&gPool.queueCond);
+        Tcl_MutexFinalize(&gPool.queueMutex);
+    }
+    /* else: skip finalization — stuck workers may still reference these */
+
     if (gPool.threads)
     {
         Tcl_Free((char*)gPool.threads);
@@ -847,7 +887,13 @@ int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
         {
             Tcl_MutexUnlock(&ae->lock);
             AsyncRelease(ae); /* V-1 fix */
-            Oradpi_SetError(ip, (OradpiBase*)s, -3123, "asynchronous command still processing");
+            /* Store timeout detail in statement's OradpiMsg for oramsg,
+             * but do NOT set Tcl errorCode since we return TCL_OK. */
+            if (s)
+            {
+                s->base.msg.rc = -3123;
+                s->base.msg.ocicode = -3123;
+            }
             Tcl_SetObjResult(ip, Tcl_NewIntObj(-3123));
             return TCL_OK;
         }
