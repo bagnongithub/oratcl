@@ -640,7 +640,10 @@ void Oradpi_FreeLob(OradpiLob* l)
     Tcl_Free((char*)l);
 }
 
-static OradpiInterpState* Oradpi_Get(Tcl_Interp* ip)
+/* FIX 4 (MAJOR): Expose as the public accessor used by cmd_bind.c so that
+ * BindStoreMap and PendingMap can be reached via the single OradpiInterpState
+ * without separate AssocData registrations. */
+OradpiInterpState* Oradpi_GetInterpState(Tcl_Interp* ip)
 {
     OradpiInterpState* st = (OradpiInterpState*)Tcl_GetAssocData(ip, "oradpi", NULL);
     if (st)
@@ -651,8 +654,17 @@ static OradpiInterpState* Oradpi_Get(Tcl_Interp* ip)
     Tcl_InitHashTable(&st->conns, TCL_STRING_KEYS);
     Tcl_InitHashTable(&st->stmts, TCL_STRING_KEYS);
     Tcl_InitHashTable(&st->lobs, TCL_STRING_KEYS);
+    /* FIX 4: initialize embedded bind-store and pending maps here so they
+     * are torn down in the correct phase order by Oradpi_DeleteInterpData. */
+    Tcl_InitHashTable(&st->bindStoreMap.byStmt, TCL_STRING_KEYS);
+    Tcl_InitHashTable(&st->pendingMap.byStmt,   TCL_STRING_KEYS);
     Tcl_SetAssocData(ip, "oradpi", Oradpi_DeleteInterpData, st);
     return st;
+}
+
+static OradpiInterpState* Oradpi_Get(Tcl_Interp* ip)
+{
+    return Oradpi_GetInterpState(ip);
 }
 
 void Oradpi_DeleteInterpData(void* clientData, Tcl_Interp* ip)
@@ -672,6 +684,14 @@ void Oradpi_DeleteInterpData(void* clientData, Tcl_Interp* ip)
         if (co)
             Oradpi_CancelAndJoinAllForConn(ip, co);
     }
+
+    /* Phase 1.5: Release bind stores and pending dpiVar refs.
+     * FIX 4 (MAJOR): these were formerly separate AssocData entries whose
+     * deletion ordering relative to Phase 3 was unguaranteed.  They are now
+     * embedded in OradpiInterpState and cleared here before statements are
+     * freed, since PendingRefs hold dpiVar* handles associated with dpiStmts. */
+    Oradpi_ClearPendingMap(&st->pendingMap);
+    Oradpi_ClearBindStoreMap(&st->bindStoreMap);
 
     /* Phase 2: Free LOBs */
     for (e = Tcl_FirstHashEntry(&st->lobs, &search); e; e = Tcl_NextHashEntry(&search))

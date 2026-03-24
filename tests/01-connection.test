@@ -128,6 +128,43 @@ test 01-5.7 {quoted password with slash parses (fails at connect, not parse)} -b
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
 
+# ---- Escape-sequence handling inside quoted passwords ----
+# These tests exercise the backslash-unescape path in Oradpi_ParseConnect.
+# The connect string reaches the ODPI connect call and fails there (unknown
+# host), confirming the parser accepted the escape syntax without rejecting
+# it as malformed.  The Tcl_DString-based decode must handle both \" and \\
+# without corrupting the credential or crashing under concurrent load.
+
+test 01-5.8 {escaped double-quote inside quoted password parses} -body {
+    package require oratcl 9.0
+    # Password contains a literal " character, escaped as \"
+    # Raw Tcl string: testuser/"p\"ass"@nonexistent_db
+    set rc [catch {oralogon "testuser/\"p\\\"ass\"@nonexistent_db_12345"} msg]
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
+test 01-5.9 {escaped backslash inside quoted password parses} -body {
+    package require oratcl 9.0
+    # Password contains a literal \ character, escaped as \\
+    # Raw Tcl string: testuser/"p\\ass"@nonexistent_db
+    set rc [catch {oralogon "testuser/\"p\\\\ass\"@nonexistent_db_12345"} msg]
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
+test 01-5.10 {both escape sequences in one quoted password parse} -body {
+    package require oratcl 9.0
+    # Password: p\"a\\ss  (contains both an escaped quote and escaped backslash)
+    set rc [catch {oralogon "testuser/\"p\\\"a\\\\ss\"@nonexistent_db_12345"} msg]
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
+test 01-5.11 {quoted password missing closing quote still rejected} -body {
+    package require oratcl 9.0
+    # The escaped-quote unescape must not consume the mandatory closing quote
+    set rc [catch {oralogon {testuser/"no_close_quote_escape\"@db}} msg]
+    list $rc [string match "*malformed*" $msg]
+} -result {1 1}
+
 # ---- Wrong argument counts ----
 
 test 01-6.0 {oralogon no args} -body {

@@ -35,13 +35,18 @@
 #define DPI_DEFAULT_PREFETCH_ROWS 2
 #endif
 
-#ifndef BINDSTORE_ASSOC
-#define BINDSTORE_ASSOC "oradpi.bindstore"
-#endif
+/* FIX 4 (MAJOR): BindStoreMap and PendingMap are declared here so they can
+ * be embedded directly in OradpiInterpState, replacing the separate
+ * Tcl_SetAssocData registrations whose teardown order was unguaranteed. */
+typedef struct BindStoreMap
+{
+    Tcl_HashTable byStmt;
+} BindStoreMap;
 
-#ifndef PENDING_ASSOC
-#define PENDING_ASSOC "oradpi.pending"
-#endif
+typedef struct PendingMap
+{
+    Tcl_HashTable byStmt;
+} PendingMap;
 
 typedef struct GlobalConnRec GlobalConnRec;
 
@@ -140,6 +145,11 @@ typedef struct OradpiInterpState
     Tcl_HashTable conns;
     Tcl_HashTable stmts;
     Tcl_HashTable lobs;
+    /* FIX 4 (MAJOR): Embedded instead of separate AssocData registrations.
+     * Teardown is now driven by Oradpi_DeleteInterpData in the correct phase
+     * order; no more unguaranteed inter-assoc deletion ordering. */
+    BindStoreMap bindStoreMap;
+    PendingMap   pendingMap;
 } OradpiInterpState;
 
 OradpiLob* Oradpi_LookupLob(Tcl_Interp* ip, Tcl_Obj* nameObj);

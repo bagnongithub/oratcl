@@ -15,6 +15,7 @@
  */
 
 #include <limits.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "cmd_int.h"
@@ -35,7 +36,8 @@ static int Oradpi_ParseConnect(const char* cs,
                                uint32_t* plen,
                                const char** db,
                                uint32_t* dblen,
-                               int* extAuth);
+                               int* extAuth,
+                               Tcl_DString* pwDs);
 
 /* ------------------------------------------------------------------------- *
  * Implementation
@@ -44,6 +46,10 @@ static int Oradpi_ParseConnect(const char* cs,
 /* m-2: Parse connect string with support for double-quoted passwords.
  * Format: user/"pass@word"@db  or  user/password@db  or  /  (ext auth)
  * Passwords containing @ or / must be double-quoted.
+ * FIX 5 (MAJOR): quoted passwords now support backslash escapes:
+ *   \"  → literal double-quote inside the password
+ *   \\  → literal backslash
+ * Without escaping, passwords containing " were unrepresentable.
  * V-7 fix: all length computations use size_t with range checks before
  * narrowing to uint32_t, preventing truncation on pathological inputs.
  * V-6 fix: reject overflow instead of silently clamping — returns 0 on
@@ -55,7 +61,8 @@ static int Oradpi_ParseConnect(const char* cs,
                                uint32_t* plen,
                                const char** db,
                                uint32_t* dblen,
-                               int* extAuth)
+                               int* extAuth,
+                               Tcl_DString* pwDs)
 {
     *user = *pw = *db = NULL;
     *ulen = *plen = *dblen = 0;
@@ -93,24 +100,63 @@ static int Oradpi_ParseConnect(const char* cs,
         *user = cs;
         SAFE_U32(*ulen, (size_t)(slash - cs));
         const char* pwStart = slash + 2; /* skip /" */
-        const char* closeQuote = strchr(pwStart, '"');
-        if (closeQuote)
+
+        /* FIX 5: scan forward honouring backslash escapes to find the real
+         * closing quote.  \" and \\ are the two recognised escape sequences;
+         * any other \X is left as-is (not an error). */
+        const char* p = pwStart;
+        size_t decodedLen = 0;
+        while (*p && *p != '"')
         {
+            if (*p == '\\' && (p[1] == '"' || p[1] == '\\'))
+                p++;          /* skip the backslash; count only the next char */
+            p++;
+            decodedLen++;
+        }
+        if (*p != '"')
+        {
+            /* V-8 fix: reject missing closing quote */
+            return -1;
+        }
+        const char* closeQuote = p;
+
+        /* If there are no escape sequences the fast path applies: point
+         * directly into the original string just as before. */
+        if (decodedLen == (size_t)(closeQuote - pwStart))
+        {
+            /* No escapes — safe to alias into the original buffer */
             *pw = pwStart;
-            SAFE_U32(*plen, (size_t)(closeQuote - pwStart));
-            /* After closing quote, expect @ or end of string */
-            if (closeQuote[1] == '@' && closeQuote[2])
-            {
-                *db = closeQuote + 2;
-                SAFE_U32(*dblen, strlen(*db));
-            }
+            SAFE_U32(*plen, decodedLen);
         }
         else
         {
-            /* V-8 fix: Reject missing closing quote instead of silently
-             * treating the rest of the string as the password.  The old
-             * behavior was ambiguous and error-prone for production use. */
-            return -1;
+            /* Escapes present — decode into the caller-supplied Tcl_DString.
+             * This avoids the former static buffer, which was unsafe under
+             * concurrent oralogon calls (cross-thread data race on credentials).
+             * Tcl_DString is stack-anchored for short strings; no heap alloc
+             * unless the decoded password exceeds TCL_DSTRING_STATIC_SIZE. */
+            size_t rawSpan = (size_t)(closeQuote - pwStart);
+            /* ODPI-C takes uint32_t length; reject overlarge passwords */
+            if (rawSpan > UINT32_MAX)
+                return -1;
+            const char* src = pwStart;
+            while (*src && *src != '"')
+            {
+                char ch = *src;
+                if (ch == '\\' && (src[1] == '"' || src[1] == '\\'))
+                    ch = *++src; /* consume backslash; use escaped char */
+                Tcl_DStringAppend(pwDs, &ch, 1);
+                src++;
+            }
+            *pw = Tcl_DStringValue(pwDs);
+            SAFE_U32(*plen, (size_t)Tcl_DStringLength(pwDs));
+        }
+
+        /* After closing quote, expect @ or end of string */
+        if (closeQuote[1] == '@' && closeQuote[2])
+        {
+            *db = closeQuote + 2;
+            SAFE_U32(*dblen, strlen(*db));
         }
         return 0;
     }
@@ -260,10 +306,19 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     const char *user = NULL, *pw = NULL, *db = NULL;
     uint32_t ulen = 0, plen = 0, dblen = 0;
     int ext = 0;
+    /* pwDs holds the unescaped password bytes when the connect string uses
+     * backslash escapes inside a quoted password.  It must be live until
+     * after the dpiConn_create / dpiPool_create calls that read pw-plen,
+     * then freed immediately afterwards to avoid leaking its storage. */
+    Tcl_DString pwDs;
+    Tcl_DStringInit(&pwDs);
     /* V-6 fix: reject pathological connect strings whose components
      * exceed uint32_t range instead of silently clamping. */
-    if (Oradpi_ParseConnect(connstr, &user, &ulen, &pw, &plen, &db, &dblen, &ext) != 0)
+    if (Oradpi_ParseConnect(connstr, &user, &ulen, &pw, &plen, &db, &dblen, &ext, &pwDs) != 0)
+    {
+        Tcl_DStringFree(&pwDs);
         return Oradpi_SetError(ip, NULL, -1, "malformed connect string (missing closing quote or component exceeds maximum length)");
+    }
 
     dpiContext* ctx = Oradpi_GetDpiContext();
     if (!ctx)
@@ -295,25 +350,36 @@ int Oradpi_Cmd_Logon(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         pp.homogeneous = homogeneous;
         pp.externalAuth = ext;
         if (dpiPool_create(ctx, user, ulen, pw, plen, db, dblen, &cparams, &pp, &pool) != DPI_SUCCESS)
+        {
+            Tcl_DStringFree(&pwDs);
             return Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_create");
+        }
         if (dpiPool_setGetMode(pool, (dpiPoolGetMode)getmode) != DPI_SUCCESS)
         {
             dpiPool_close(pool, DPI_MODE_POOL_CLOSE_DEFAULT);
             dpiPool_release(pool);
+            Tcl_DStringFree(&pwDs);
             return Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_setGetMode");
         }
         if (dpiPool_acquireConnection(pool, NULL, 0, NULL, 0, &ccp, &conn) != DPI_SUCCESS)
         {
             dpiPool_close(pool, DPI_MODE_POOL_CLOSE_DEFAULT);
             dpiPool_release(pool);
+            Tcl_DStringFree(&pwDs);
             return Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_acquireConnection");
         }
     }
     else
     {
         if (dpiConn_create(ctx, user, ulen, pw, plen, db, dblen, &cparams, &ccp, &conn) != DPI_SUCCESS)
+        {
+            Tcl_DStringFree(&pwDs);
             return Oradpi_SetErrorFromODPI(ip, NULL, "dpiConn_create");
+        }
     }
+
+    /* Password storage no longer needed — ODPI has copied credentials */
+    Tcl_DStringFree(&pwDs);
 
     /* Tcl 9 Tcl_Alloc panics on OOM; NewConn cannot return NULL. */
     OradpiConn* co = Oradpi_NewConn(ip, conn, pool);

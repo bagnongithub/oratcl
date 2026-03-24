@@ -13,6 +13,7 @@
  *
  */
 
+#include <inttypes.h>
 #include <limits.h>
 #include <string.h>
 
@@ -345,8 +346,25 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
             }
             case COPT_FOMAXATT:
             {
-                if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->foMaxAttempts, "foMaxAttempts") != TCL_OK)
+                uint32_t v = 0;
+                if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &v, "foMaxAttempts") != TCL_OK)
                     return TCL_ERROR;
+                /* FIX 7 (MINOR): enforce a reasonable upper bound.  Without this,
+                 * foMaxAttempts = 4000000000 pins the executing thread in a retry
+                 * loop for an effectively unbounded time, destroying latency and
+                 * acting as a self-inflicted DoS via misconfiguration.
+                 * 1000 retries is already far beyond any realistic recovery scenario
+                 * and keeps the maximum total backoff under a few hours. */
+#define ORADPI_FOMAXATTEMPTS_MAX 1000u
+                if (v > ORADPI_FOMAXATTEMPTS_MAX)
+                {
+                    Tcl_SetObjResult(ip, Tcl_ObjPrintf(
+                        "foMaxAttempts value %" PRIu32 " exceeds maximum %u",
+                        v, ORADPI_FOMAXATTEMPTS_MAX));
+                    return TCL_ERROR;
+                }
+#undef ORADPI_FOMAXATTEMPTS_MAX
+                co->foMaxAttempts = v;
                 break;
             }
             case COPT_FOBACKOFF:
@@ -388,8 +406,20 @@ static int Oradpi_ConfigConn(Tcl_Interp* ip, OradpiConn* co, Tcl_Size objc, Tcl_
             }
             case COPT_FODEBOUNCE:
             {
-                if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->foDebounceMs, "foDebounceMs") != TCL_OK)
+                uint32_t v = 0;
+                if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &v, "foDebounceMs") != TCL_OK)
                     return TCL_ERROR;
+                /* FIX 6 (MINOR): reject values that would overflow int at timer
+                 * scheduling time.  Tcl_CreateTimerHandler takes an int delay;
+                 * silently clamping to INT_MAX at use-time violates the principle
+                 * of rejecting rather than narrowing out-of-range config values. */
+                if (v > (uint32_t)INT_MAX)
+                {
+                    Tcl_SetObjResult(ip, Tcl_ObjPrintf(
+                        "foDebounceMs value %" PRIu32 " exceeds maximum %d", v, INT_MAX));
+                    return TCL_ERROR;
+                }
+                co->foDebounceMs = v;
                 break;
             }
             case COPT_FOCALLBACK:

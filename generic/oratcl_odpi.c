@@ -50,13 +50,17 @@ static int gExitHookRegistered = 0;
 static void Oradpi_ProcessExit(void* unused)
 {
     (void)unused;
+    /* Two-phase teardown: swap the global pointer to a local under the lock,
+     * then destroy outside the lock.  This avoids calling into ODPI-C while
+     * holding gCtxMutex, which could deadlock if ODPI's own teardown path ever
+     * tries to acquire a mutex that a thread is holding while waiting on ours. */
+    dpiContext* ctx = NULL;
     Tcl_MutexLock(&gCtxMutex);
-    if (Oradpi_GlobalDpiContext)
-    {
-        dpiContext_destroy(Oradpi_GlobalDpiContext);
-        Oradpi_GlobalDpiContext = NULL;
-    }
+    ctx = Oradpi_GlobalDpiContext;
+    Oradpi_GlobalDpiContext = NULL;
     Tcl_MutexUnlock(&gCtxMutex);
+    if (ctx)
+        dpiContext_destroy(ctx);
 }
 
 dpiContext* Oradpi_GetDpiContext(void)
@@ -193,8 +197,11 @@ static void Oratcl_InterpDeleteProc(void* clientData, Tcl_Interp* ip)
     (void)clientData;
     (void)ip;
     /* Intentionally empty: actual cleanup is handled by the AssocData delete
-     * procs registered by each subsystem ("oradpi", "oradpi.bindstore",
-     * "oradpi.pending").  This proc exists solely as the delete callback for
+     * proc registered under the "oradpi" key (Oradpi_DeleteInterpData in
+     * state.c), which performs phased teardown of all per-interp handles.
+     * BindStoreMap and PendingMap are embedded in OradpiInterpState and torn
+     * down as part of that same phase sequence — they no longer have separate
+     * AssocData entries.  This proc exists solely as the delete callback for
      * the ORATCL_INTERP_MARK sentinel that prevents double-registration of
      * commands when the package is loaded more than once in the same interp. */
 }

@@ -47,6 +47,10 @@ typedef struct OradpiAsyncEntry
     int rc;
     int errorCode;
     char* errorMsg;
+    /* FIX 3 (MAJOR): persist dpiErrorInfo fields needed by orawaitasync so it
+     * can call Oradpi_SetErrorFromODPIInfo and restore full failover semantics
+     * (isRecoverable flag, failover callback dispatch) on the interp thread. */
+    int isRecoverable;
 
     dpiConn* conn;
     dpiStmt* stmt;
@@ -395,8 +399,14 @@ static void PoolExitHandler(void* unused)
     nThreads = gPool.nThreads;
     Tcl_MutexUnlock(&gPoolInitMutex);
 
-    /* M-1 fix: Before joining, break execution on all active async
-     * connections to give workers a chance to unblock from OCI calls. */
+    /* FIX 2 (MAJOR): Two-phase break — collect (shared, conn) pairs under
+     * gAsyncMutex, then call Oradpi_SharedConnBreak *outside* that lock.
+     * Holding gAsyncMutex while calling into ODPI/OCI (which can block on
+     * network or driver state) risks deadlock and long stalls at shutdown. */
+    typedef struct { GlobalConnRec* shared; dpiConn* conn; } BreakItem;
+    BreakItem* breakList = NULL;
+    int breakCap = 0, breakCount = 0;
+
     Tcl_MutexLock(&gAsyncMutex);
     if (gAsyncInit)
     {
@@ -405,24 +415,36 @@ static void PoolExitHandler(void* unused)
         for (e = Tcl_FirstHashEntry(&gAsyncByKey, &hs); e; e = Tcl_NextHashEntry(&hs))
         {
             OradpiAsyncEntry* ae = (OradpiAsyncEntry*)Tcl_GetHashValue(e);
-            if (ae)
+            if (!ae)
+                continue;
+            Tcl_MutexLock(&ae->lock);
+            if (ae->running && !ae->done && ae->conn)
             {
-                Tcl_MutexLock(&ae->lock);
-                if (ae->running && !ae->done && ae->conn)
+                ae->canceled = 1;
+                /* Grow list if needed.  Tcl_Realloc panics on OOM in Tcl 9;
+                 * a NULL check here would imply a fallible allocator and
+                 * mislead future readers about the actual failure mode. */
+                if (breakCount >= breakCap)
                 {
-                    ae->canceled = 1;
-                    dpiConn* localConn = ae->conn;
-                    Tcl_MutexUnlock(&ae->lock);
-                    Oradpi_SharedConnBreak(ae->shared, localConn);
+                    int newCap = breakCap ? breakCap * 2 : 8;
+                    breakList = (BreakItem*)Tcl_Realloc(
+                        (char*)breakList, (unsigned)newCap * sizeof(BreakItem));
+                    breakCap = newCap;
                 }
-                else
-                {
-                    Tcl_MutexUnlock(&ae->lock);
-                }
+                breakList[breakCount].shared = ae->shared;
+                breakList[breakCount].conn   = ae->conn;
+                breakCount++;
             }
+            Tcl_MutexUnlock(&ae->lock);
         }
     }
     Tcl_MutexUnlock(&gAsyncMutex);
+
+    /* Phase 2: call into ODPI/OCI with no global locks held */
+    for (int bi = 0; bi < breakCount; bi++)
+        Oradpi_SharedConnBreak(breakList[bi].shared, breakList[bi].conn);
+    if (breakList)
+        Tcl_Free((char*)breakList);
 
     Tcl_MutexLock(&gPool.queueMutex);
     gPool.shutdown = 1;
@@ -671,6 +693,8 @@ static void AsyncWorkerBody(const char* key)
     ae->rc = finalRc;
     ae->errorCode = finalErrCode;
     ae->errorMsg = finalErrMsg;
+    /* FIX 3: persist recoverability so orawaitasync can fire failover callbacks */
+    ae->isRecoverable = (execRc != DPI_SUCCESS) ? lastEi.isRecoverable : 0;
     ae->done = 1;
     ae->running = 0;
     int wasOrphaned = ae->orphaned;
@@ -920,10 +944,12 @@ int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
     Tcl_MutexUnlock(&ae->lock);
 
     int rc, errCode;
+    int isRecoverable = 0;
     char* errMsg = NULL;
     Tcl_MutexLock(&ae->lock);
     rc = ae->rc;
     errCode = ae->errorCode;
+    isRecoverable = ae->isRecoverable;
     if (ae->errorMsg)
     {
         /* V-6 fix: pass NULL interp to avoid calling Tcl_SetObjResult
@@ -961,13 +987,24 @@ int Oradpi_Cmd_WaitAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
 
     if (rc != 0)
     {
+        /* FIX 3 (MAJOR): Reconstruct a minimal dpiErrorInfo on the interp thread
+         * from the fields the worker persisted in OradpiAsyncEntry, then call
+         * Oradpi_SetErrorFromODPIInfo(NULL, ...) so that:
+         *   (a) h->msg.recoverable is set correctly from ae->isRecoverable, and
+         *   (b) if the error is recoverable and a failover callback is configured,
+         *       Oradpi_PostFailoverEvent fires from the connection's owner thread
+         *       (the only thread permitted to touch those Tcl_Obj fields safely).
+         * NULL interp keeps the interp result and errorCode clean — the numeric
+         * resultCode below is the sole error signal per the orawaitasync contract. */
+        dpiErrorInfo ei;
+        memset(&ei, 0, sizeof(ei));
+        ei.code          = (int32_t)(errCode ? errCode : -1);
+        ei.isRecoverable = isRecoverable;
+        ei.message       = errMsg ? errMsg : "asynchronous execute failed";
+        ei.messageLength = (uint32_t)strlen(ei.message);
+        Oradpi_SetErrorFromODPIInfo(NULL, (OradpiBase*)s, "oraexecasync", &ei);
         if (errMsg)
-        {
-            Oradpi_SetError(ip, (OradpiBase*)s, errCode ? errCode : -1, errMsg);
             Tcl_Free(errMsg);
-        }
-        else
-            Oradpi_SetError(ip, (OradpiBase*)s, -1, "asynchronous execute failed");
     }
     /* V-6 fix: return the actual Oracle/ODPI error code on failure, not the
      * worker's internal -1 sentinel.  This matches the documented contract:

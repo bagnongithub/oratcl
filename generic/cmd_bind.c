@@ -25,20 +25,12 @@
 #include "cmd_int.h"
 #include "dpi.h"
 
+/* BindStoreMap and PendingMap are declared in state.h and embedded in
+ * OradpiInterpState (FIX 4).  BindStore remains local to this file. */
 typedef struct BindStore
 {
     Tcl_HashTable byName;
 } BindStore;
-
-typedef struct BindStoreMap
-{
-    Tcl_HashTable byStmt;
-} BindStoreMap;
-
-typedef struct PendingMap
-{
-    Tcl_HashTable byStmt;
-} PendingMap;
 
 /* ==========================================================================
  * Forward Declarations
@@ -51,14 +43,12 @@ static int BindOneLobScalar(Tcl_Interp* ip,
                             dpiOracleTypeNum lobType,
                             const char* buf,
                             uint32_t buflen);
-static void BindStoreDelete(void* cd, Tcl_Interp* ip);
 static BindStore* GetBindStore(Tcl_Interp* ip, const char* stmtKey);
 static BindStoreMap* GetBindStoreMap(Tcl_Interp* ip);
 static PendingMap* GetPendingMap(Tcl_Interp* ip);
 static OradpiPendingRefs* GetPendings(Tcl_Interp* ip, const char* stmtKey);
 static int is_blob_hint(const char* nameNoColon);
 static int is_clob_hint(const char* nameNoColon);
-static void PendingDelete(void* cd, Tcl_Interp* ip);
 static void StoreBind(BindStore* bs, const char* nameNoColon, Tcl_Obj* v);
 static int strcasestr_contains(const char* hay, const char* needle);
 
@@ -267,10 +257,17 @@ static int is_clob_hint(const char* nameNoColon)
 
 /* ---- BindStore (per-statement stored binds) ---- */
 
-static void BindStoreDelete(void* cd, Tcl_Interp* ip)
+/* FIX 4 (MAJOR): BindStoreMap is now embedded in OradpiInterpState, so this
+ * function clears the map contents without freeing the map struct itself.
+ * Called from Oradpi_DeleteInterpData (state.c) during Phase 1.5 teardown.
+ *
+ * IMPORTANT: Tcl_DeleteHashTable frees all internal storage and leaves the
+ * table in an uninitialised state.  Phase 3 (FreeStmt) calls
+ * Oradpi_BindStoreForget, which calls Tcl_FindHashEntry on this same table.
+ * To avoid a use-after-delete crash we must re-initialise the table to a
+ * valid empty state immediately after deleting it. */
+void Oradpi_ClearBindStoreMap(BindStoreMap* bm)
 {
-    (void)ip;
-    BindStoreMap* bm = (BindStoreMap*)cd;
     if (!bm)
         return;
     Tcl_HashSearch hs1;
@@ -290,18 +287,16 @@ static void BindStoreDelete(void* cd, Tcl_Interp* ip)
         Tcl_Free((char*)bs);
     }
     Tcl_DeleteHashTable(&bm->byStmt);
-    Tcl_Free((char*)bm);
+    /* Re-initialise so that subsequent Tcl_FindHashEntry calls from Phase 3
+     * FreeStmt → Oradpi_BindStoreForget operate on a valid empty table. */
+    Tcl_InitHashTable(&bm->byStmt, TCL_STRING_KEYS);
 }
 
 static BindStoreMap* GetBindStoreMap(Tcl_Interp* ip)
 {
-    BindStoreMap* bm = (BindStoreMap*)Tcl_GetAssocData(ip, BINDSTORE_ASSOC, NULL);
-    if (bm)
-        return bm;
-    bm = (BindStoreMap*)Tcl_Alloc(sizeof(*bm));
-    Tcl_InitHashTable(&bm->byStmt, TCL_STRING_KEYS);
-    Tcl_SetAssocData(ip, BINDSTORE_ASSOC, BindStoreDelete, bm);
-    return bm;
+    /* FIX 4: use the embedded map instead of a separate AssocData entry */
+    OradpiInterpState* st = Oradpi_GetInterpState(ip);
+    return &st->bindStoreMap;
 }
 
 static BindStore* GetBindStore(Tcl_Interp* ip, const char* stmtKey)
@@ -335,9 +330,9 @@ static void StoreBind(BindStore* bs, const char* nameNoColon, Tcl_Obj* v)
 
 void Oradpi_BindStoreForget(Tcl_Interp* ip, const char* stmtKey)
 {
-    BindStoreMap* bm = (BindStoreMap*)Tcl_GetAssocData(ip, BINDSTORE_ASSOC, NULL);
-    if (!bm)
-        return;
+    /* FIX 4: embedded map — no AssocData lookup needed */
+    OradpiInterpState* st = Oradpi_GetInterpState(ip);
+    BindStoreMap* bm = &st->bindStoreMap;
     Tcl_HashEntry* he = Tcl_FindHashEntry(&bm->byStmt, stmtKey);
     if (!he)
         return;
@@ -364,10 +359,15 @@ void Oradpi_ClearBindStoreForStmt(Tcl_Interp* ip, const char* stmtKey)
 
 /* ---- PendingRefs (dpiVar* refs kept alive until execution) ---- */
 
-static void PendingDelete(void* cd, Tcl_Interp* ip)
+/* FIX 4 (MAJOR): PendingMap is now embedded in OradpiInterpState; this
+ * function clears its contents without freeing the map struct itself.
+ * Called from Oradpi_DeleteInterpData (state.c) during Phase 1.5 teardown.
+ *
+ * IMPORTANT: same re-init requirement as Oradpi_ClearBindStoreMap — Phase 3
+ * FreeStmt calls Oradpi_PendingsForget which calls Tcl_FindHashEntry on this
+ * table.  Re-initialise to a valid empty state after deletion. */
+void Oradpi_ClearPendingMap(PendingMap* pm)
 {
-    (void)ip;
-    PendingMap* pm = (PendingMap*)cd;
     if (!pm)
         return;
     Tcl_HashSearch hs;
@@ -384,18 +384,16 @@ static void PendingDelete(void* cd, Tcl_Interp* ip)
         Tcl_Free((char*)pr);
     }
     Tcl_DeleteHashTable(&pm->byStmt);
-    Tcl_Free((char*)pm);
+    /* Re-initialise so that subsequent Tcl_FindHashEntry calls from Phase 3
+     * FreeStmt → Oradpi_PendingsForget operate on a valid empty table. */
+    Tcl_InitHashTable(&pm->byStmt, TCL_STRING_KEYS);
 }
 
 static PendingMap* GetPendingMap(Tcl_Interp* ip)
 {
-    PendingMap* pm = (PendingMap*)Tcl_GetAssocData(ip, PENDING_ASSOC, NULL);
-    if (pm)
-        return pm;
-    pm = (PendingMap*)Tcl_Alloc(sizeof(*pm));
-    Tcl_InitHashTable(&pm->byStmt, TCL_STRING_KEYS);
-    Tcl_SetAssocData(ip, PENDING_ASSOC, PendingDelete, pm);
-    return pm;
+    /* FIX 4: use the embedded map instead of a separate AssocData entry */
+    OradpiInterpState* st = Oradpi_GetInterpState(ip);
+    return &st->pendingMap;
 }
 
 static OradpiPendingRefs* GetPendings(Tcl_Interp* ip, const char* stmtKey)
@@ -478,9 +476,9 @@ void Oradpi_PendingsFree(OradpiPendingRefs* pr)
 
 void Oradpi_PendingsForget(Tcl_Interp* ip, const char* stmtKey)
 {
-    PendingMap* pm = (PendingMap*)Tcl_GetAssocData(ip, PENDING_ASSOC, NULL);
-    if (!pm)
-        return;
+    /* FIX 4: embedded map — no AssocData lookup needed */
+    OradpiInterpState* st = Oradpi_GetInterpState(ip);
+    PendingMap* pm = &st->pendingMap;
     Tcl_HashEntry* he = Tcl_FindHashEntry(&pm->byStmt, stmtKey);
     if (!he)
         return;
@@ -655,9 +653,9 @@ int Oradpi_BindOneByValue(Tcl_Interp* ip, OradpiStmt* s, OradpiPendingRefs* pr, 
 /* Rebind all stored binds for a statement (used by cmd_exec.c) */
 int Oradpi_RebindAllStored(Tcl_Interp* ip, OradpiStmt* s, OradpiPendingRefs* pr, const char* stmtKey)
 {
-    BindStoreMap* bm = (BindStoreMap*)Tcl_GetAssocData(ip, BINDSTORE_ASSOC, NULL);
-    if (!bm)
-        return TCL_OK;
+    /* FIX 4: use embedded map via Oradpi_GetInterpState, not AssocData */
+    OradpiInterpState* st = Oradpi_GetInterpState(ip);
+    BindStoreMap* bm = &st->bindStoreMap;
     Tcl_HashEntry* he = Tcl_FindHashEntry(&bm->byStmt, stmtKey);
     if (!he)
         return TCL_OK;

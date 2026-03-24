@@ -195,6 +195,9 @@ static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags)
             Tcl_DecrRefCount(fe->ldaName);
         if (fe->message)
             Tcl_DecrRefCount(fe->message);
+        /* FIX 1 (CRITICAL): free the event struct on every return path.
+         * Tcl's event model requires the handler to free its own event. */
+        Tcl_Free((char*)fe);
         return 1;
     }
 
@@ -205,6 +208,7 @@ static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags)
         Tcl_Release(fe->ip);
         Tcl_DecrRefCount(fe->ldaName);
         Tcl_DecrRefCount(fe->message);
+        Tcl_Free((char*)fe);
         return 1;
     }
 
@@ -217,9 +221,10 @@ static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags)
     /* Start debounce timer if not already scheduled */
     if (!co->foTimerScheduled)
     {
-        /* V-5 fix: clamp uint32_t to int range to prevent negative wrap */
+        /* foDebounceMs is validated <= INT_MAX at oraconfig time (Fix 6),
+         * so the cast is safe; keep the default 250 ms if unset. */
         uint32_t ms = co->foDebounceMs ? co->foDebounceMs : 250;
-        int delay = (ms > (uint32_t)INT_MAX) ? INT_MAX : (int)ms;
+        int delay = (int)ms;
         co->foTimer = Tcl_CreateTimerHandler(delay, Oradpi_FailoverTimerProc, co);
         co->foTimerScheduled = 1;
     }
@@ -227,6 +232,7 @@ static int Oradpi_FailoverEventProc(Tcl_Event* evPtr, int flags)
     Tcl_Release(fe->ip);
     Tcl_DecrRefCount(fe->ldaName);
     Tcl_DecrRefCount(fe->message);
+    Tcl_Free((char*)fe);
     return 1;
 }
 

@@ -243,6 +243,7 @@ static inline int Oradpi_CheckedAllocBytes(Tcl_Interp* ip, Tcl_Size count, size_
     } while (0)
 
 /* State ops */
+OradpiInterpState* Oradpi_GetInterpState(Tcl_Interp* ip);
 OradpiConn* Oradpi_NewConn(Tcl_Interp* ip, dpiConn* conn, dpiPool* pool);
 OradpiConn* Oradpi_LookupConn(Tcl_Interp* ip, Tcl_Obj* nameObj);
 OradpiStmt* Oradpi_NewStmt(Tcl_Interp* ip, OradpiConn* co);
@@ -273,6 +274,10 @@ void Oradpi_PendingsInit(OradpiPendingRefs* pr);
 void Oradpi_PendingsAdd(OradpiPendingRefs* pr, dpiVar* v);
 void Oradpi_PendingsReleaseAll(OradpiPendingRefs* pr);
 void Oradpi_PendingsFree(OradpiPendingRefs* pr);
+
+/* FIX 4 (MAJOR): clear helpers for the embedded maps in OradpiInterpState */
+void Oradpi_ClearBindStoreMap(BindStoreMap* bm);
+void Oradpi_ClearPendingMap(PendingMap* pm);
 
 void Oradpi_BindStoreForget(Tcl_Interp* ip, const char* stmtKey);
 void Oradpi_PendingsForget(Tcl_Interp* ip, const char* stmtKey);
