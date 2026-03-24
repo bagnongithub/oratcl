@@ -276,6 +276,38 @@ test 02-5.10 {fetch without execute errors} -constraints {have_connect} -body {
     }
 } -result 1
 
+test 02-5.11 {orafetch -command break stops fetch early} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 5
+        set S [oraopen $L]
+        orasql $S "SELECT id FROM $T ORDER BY id"
+        set collected {}
+        orafetch $S -datavariable row -indexbynumber -command {
+            lappend collected [lindex $row 0]
+            if {[lindex $row 0] == 3} break
+        }
+        oraclose $S
+        set collected
+    }
+} -result {1 2 3}
+
+test 02-5.12 {orafetch -command continue skips rows} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 5
+        set S [oraopen $L]
+        orasql $S "SELECT id FROM $T ORDER BY id"
+        set collected {}
+        orafetch $S -datavariable row -indexbynumber -command {
+            if {[lindex $row 0] == 2 || [lindex $row 0] == 4} continue
+            lappend collected [lindex $row 0]
+        }
+        oraclose $S
+        set collected
+    }
+} -result {1 3 5}
+
 # ---- oracols ----
 
 test 02-6.0 {oracols returns column metadata} -constraints {have_connect} -body {

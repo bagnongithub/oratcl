@@ -327,7 +327,10 @@ static void PoolEnsure(void)
 
     /* V-10 fix: only mark pool as initialized if at least one worker was
      * created.  If all thread creations failed, roll back fully so a later
-     * call to PoolEnsure() can retry. */
+     * call to PoolEnsure() can retry.
+     * Limitation: Tcl_CreateThread does not expose OS-level error details,
+     * so the caller (Cmd_ExecAsync) can only report a generic failure.
+     * The caller detects this via PoolThreadCount() == 0. */
     if (gPool.nThreads == 0)
     {
         Tcl_Free((char*)gPool.threads);
@@ -725,7 +728,8 @@ int Oradpi_Cmd_ExecAsync(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const
 
     PoolEnsure();
     if (PoolThreadCount() == 0)
-        return Oradpi_SetError(ip, (OradpiBase*)s, -1, "failed to create async thread pool");
+        return Oradpi_SetError(ip, (OradpiBase*)s, -1,
+            "failed to create async thread pool (Tcl_CreateThread failed; check system thread limits)");
 
     /* C-2 fix: use stable string key (handle name) instead of raw pointer */
     const char* key = Tcl_GetString(s->base.name);

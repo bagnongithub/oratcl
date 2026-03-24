@@ -125,7 +125,6 @@ typedef struct OradpiStmt
 
     uint32_t numCols;
     int defined;
-    int executedInParse; /* set when oraparse auto-executes a no-bind query */
 } OradpiStmt;
 
 typedef struct OradpiLob

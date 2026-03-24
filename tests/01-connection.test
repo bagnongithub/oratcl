@@ -103,6 +103,31 @@ test 01-5.3 {oralogon with valid quoted password syntax parses} -body {
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
 
+test 01-5.4 {external auth with db parses (fails at connect, not parse)} -body {
+    package require oratcl 9.0
+    set rc [catch {oralogon {/@nonexistent_db_12345}} msg]
+    # Parser should accept; connect will fail
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
+test 01-5.5 {plain user/password@db parses (fails at connect, not parse)} -body {
+    package require oratcl 9.0
+    set rc [catch {oralogon {testuser/testpass@nonexistent_db_12345}} msg]
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
+test 01-5.6 {empty password user/@db parses (fails at connect, not parse)} -body {
+    package require oratcl 9.0
+    set rc [catch {oralogon {testuser/@nonexistent_db_12345}} msg]
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
+test 01-5.7 {quoted password with slash parses (fails at connect, not parse)} -body {
+    package require oratcl 9.0
+    set rc [catch {oralogon {testuser/"pass/word"@nonexistent_db_12345}} msg]
+    list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
+} -result {1 1}
+
 # ---- Wrong argument counts ----
 
 test 01-6.0 {oralogon no args} -body {

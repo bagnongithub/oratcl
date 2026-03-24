@@ -15,6 +15,7 @@
  */
 
 #include <limits.h>
+#include <stdatomic.h>
 #include <string.h>
 /* V-9 fix: strncasecmp is declared in <strings.h> on POSIX, not <string.h> */
 #ifndef _WIN32
@@ -61,9 +62,11 @@ static void PendingDelete(void* cd, Tcl_Interp* ip);
 static void StoreBind(BindStore* bs, const char* nameNoColon, Tcl_Obj* v);
 static int strcasestr_contains(const char* hay, const char* needle);
 
-/* Cached Tcl type pointer to avoid per-bind hash lookup (fix 4.3) */
-static const Tcl_ObjType* gBytearrayType = NULL;
-/* gTypeInitMutex: protects gBytearrayType (one-time init).
+/* Cached Tcl type pointer to avoid per-bind hash lookup (fix 4.3).
+ * _Atomic with acquire/release ordering eliminates the data race on the
+ * outer read in EnsureBytearrayType's double-check pattern. */
+static _Atomic(const Tcl_ObjType*) gBytearrayType = NULL;
+/* gTypeInitMutex: protects gBytearrayType publication (one-time init).
  * Lock ordering: leaf lock, no other locks held while this is held. */
 static Tcl_Mutex gTypeInitMutex;
 
@@ -81,18 +84,15 @@ static int CheckU32(Tcl_Interp* ip, Tcl_Size len, uint32_t* out)
 
 static const Tcl_ObjType* EnsureBytearrayType(void)
 {
-    /* V-6 fix: perform all Tcl API calls (Tcl_GetObjType, Tcl_NewByteArrayObj,
-     * etc.) OUTSIDE the mutex to avoid deadlock risk.  Only take the lock to
-     * read/write the cached pointer. */
-    const Tcl_ObjType* cached;
-    Tcl_MutexLock(&gTypeInitMutex);
-    cached = gBytearrayType;
-    Tcl_MutexUnlock(&gTypeInitMutex);
-
+    /* Fast path: acquire-load the cached pointer without taking the lock.
+     * The release-store in the slow path ensures the resolved pointer is
+     * fully visible to all threads after this load. */
+    const Tcl_ObjType* cached = atomic_load_explicit(&gBytearrayType, memory_order_acquire);
     if (cached)
         return cached;
 
-    /* Slow path: resolve the type outside the lock */
+    /* Slow path: resolve the type outside the lock (Tcl API calls must
+     * not be made while holding gTypeInitMutex — deadlock risk). */
     const Tcl_ObjType* resolved = Tcl_GetObjType("bytearray");
     if (!resolved)
     {
@@ -103,11 +103,12 @@ static const Tcl_ObjType* EnsureBytearrayType(void)
         Tcl_DecrRefCount(tmp);
     }
 
-    /* Publish result; if another thread raced us, the value is the same */
+    /* Publish result under lock with release ordering; if another thread
+     * raced us, the value is the same (Tcl_ObjType* is process-global). */
     Tcl_MutexLock(&gTypeInitMutex);
-    if (!gBytearrayType)
-        gBytearrayType = resolved;
-    cached = gBytearrayType;
+    if (!atomic_load_explicit(&gBytearrayType, memory_order_relaxed))
+        atomic_store_explicit(&gBytearrayType, resolved, memory_order_release);
+    cached = atomic_load_explicit(&gBytearrayType, memory_order_relaxed);
     Tcl_MutexUnlock(&gTypeInitMutex);
     return cached;
 }

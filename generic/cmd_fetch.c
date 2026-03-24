@@ -539,7 +539,9 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         return Oradpi_SetError(ip, (OradpiBase*)st, -1, "orafetch: -max must be >= 0");
     /* Default to single-row fetch only in plain status-code mode.
      * When -command, -resultvar, or -returnrows is active, fetch all rows
-     * unless the caller explicitly provides -max. */
+     * unless the caller explicitly provides -max.  Note: this means
+     * "orafetch $S -command {…}" on a large result set will iterate all
+     * rows — callers should use -max to limit if the table is large. */
     if (!returnRows && !cmd && !resultVar && maxRows == 0)
         maxRows = 1;
 
@@ -735,6 +737,26 @@ int Oradpi_Cmd_Fetch(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         if (cmd)
         {
             int evalCode = Tcl_EvalObjEx(ip, cmd, TCL_EVAL_GLOBAL);
+            if (evalCode == TCL_BREAK)
+            {
+                /* TCL_BREAK: stop fetching, treat as normal completion */
+                Tcl_DecrRefCount(rowObj);
+                rowObj = NULL;
+                memset(colVals, 0, colValBytes);
+                fetched++;
+                break;
+            }
+            if (evalCode == TCL_CONTINUE)
+            {
+                /* TCL_CONTINUE: skip to next row (don't append to rowsList) */
+                Tcl_DecrRefCount(rowObj);
+                rowObj = NULL;
+                memset(colVals, 0, colValBytes);
+                fetched++;
+                if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
+                    break;
+                continue;
+            }
             if (evalCode != TCL_OK)
             {
                 code = evalCode;

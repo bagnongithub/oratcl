@@ -574,7 +574,9 @@ int Oradpi_Cmd_Parse(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
     if (sqlLen < 0 || (uint64_t)sqlLen > UINT32_MAX)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "SQL text exceeds maximum length");
 
-    (void)Oradpi_StmtWaitForAsync(s, 1, -1);
+    if (Oradpi_StmtWaitForAsync(s, 1, ORADPI_TEARDOWN_TIMEOUT_MS) == -3123)
+        return Oradpi_SetError(ip, (OradpiBase*)s, -3123,
+            "timed out waiting for async operation before re-parse");
     const char* stmtKey = Tcl_GetString(s->base.name);
     Oradpi_BindStoreForget(ip, stmtKey);
     Oradpi_PendingsForget(ip, stmtKey);
@@ -592,7 +594,6 @@ int Oradpi_Cmd_Parse(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         CONN_GATE_LEAVE(s->owner);
         return SetStmtAndOwnerODPIError(ip, s, "dpiConn_prepareStmt");
     }
-    s->executedInParse = 0;
 
     if (s->fetchArray)
     {
@@ -625,6 +626,12 @@ int Oradpi_Cmd_Parse(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const obj
         uint32_t parseOnlyCols = 0;
         if (dpiStmt_execute(s->stmt, DPI_MODE_EXEC_PARSE_ONLY, &parseOnlyCols) != DPI_SUCCESS)
         {
+            /* Clean up the server-rejected statement so subsequent oraexec
+             * gets a clear "not prepared" error instead of retrying the
+             * rejected SQL with a confusing duplicate error. */
+            dpiStmt_close(s->stmt, NULL, 0);
+            dpiStmt_release(s->stmt);
+            s->stmt = NULL;
             CONN_GATE_LEAVE(s->owner);
             return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_execute(PARSE_ONLY)");
         }

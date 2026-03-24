@@ -468,7 +468,15 @@ void Oradpi_FreeConn(OradpiConn* co)
              * the same dpiConn* via addRef.  When adopters are still active
              * (refCount > 1 — the owner's own ref plus adopter refs), we
              * skip the close and let the last dpiConn_release() handle
-             * cleanup automatically via ODPI-C reference counting. */
+             * cleanup automatically via ODPI-C reference counting.
+             *
+             * TOCTOU safety: the window between the refCount check (under
+             * gConnMapMutex) and the actual dpiConn_close (under connLock)
+             * is safe because MarkOwnerGone (line above) sets ownerAlive=0
+             * and NULLs pubConn under gConnMapMutex *before* we check the
+             * refCount.  Any concurrent LookupForAdoptAndRef will see
+             * ownerAlive=0 and refuse, so no new adopter can appear after
+             * this point — the refCount can only decrease, not increase. */
             int hasAdopters = 0;
             Tcl_MutexLock(&gConnMapMutex);
             hasAdopters = (shared->refCount > 1);

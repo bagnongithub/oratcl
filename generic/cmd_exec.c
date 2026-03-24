@@ -51,17 +51,6 @@ static int ExecOnce_WithRebind(Tcl_Interp* ip, OradpiStmt* s, const char* skey, 
     if (!s->stmt || !s->owner || !s->owner->conn)
         return Oradpi_SetError(ip, (OradpiBase*)s, -1, "statement is not prepared or connection closed");
 
-    /* If the statement was already executed during oraparse (no-bind query),
-     * skip re-execution to avoid a redundant round-trip. Clear the flag so
-     * subsequent oraexec calls do execute normally. */
-    if (s->executedInParse)
-    {
-        s->executedInParse = 0;
-        Oradpi_UpdateStmtType(s);
-        Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
-        return TCL_OK;
-    }
-
     OradpiPendingRefs pr;
     Oradpi_PendingsInit(&pr);
 
