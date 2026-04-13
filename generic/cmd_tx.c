@@ -20,57 +20,51 @@
  * Forward Declarations
  * ========================================================================== */
 
-int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
-int Oradpi_Cmd_Rollback(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
+int Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+int Oradpi_Cmd_Rollback(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
 
 /* ------------------------------------------------------------------------- *
  * Implementation
  * ------------------------------------------------------------------------- */
 
-int Oradpi_Cmd_Commit(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
-{
+int Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     (void)cd;
-    if (objc != 2)
-    {
+    if (objc != 2) {
         Tcl_WrongNumArgs(ip, 1, objv, "logon-handle");
         return TCL_ERROR;
     }
-    OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
+    OradpiConn *co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
-    /* m-6: Guard against half-torn-down connection (e.g., logged off from another interp) */
+    /* Guard against half-torn-down connection (e.g., logged off from another interp) */
     if (!co->conn)
-        return Oradpi_SetError(ip, (OradpiBase*)co, -1, "connection closed");
+        return Oradpi_SetError(ip, (OradpiBase *)co, -1, "connection closed");
     CONN_GATE_ENTER(co);
-    if (dpiConn_commit(co->conn) != DPI_SUCCESS)
-    {
+    if (dpiConn_commit(co->conn) != DPI_SUCCESS) {
         CONN_GATE_LEAVE(co);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)co, "dpiConn_commit");
+        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_commit");
     }
     CONN_GATE_LEAVE(co);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }
 
-int Oradpi_Cmd_Rollback(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
-{
+int Oradpi_Cmd_Rollback(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     (void)cd;
-    if (objc != 2)
-    {
+    if (objc != 2) {
         Tcl_WrongNumArgs(ip, 1, objv, "logon-handle");
         return TCL_ERROR;
     }
-    OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
+    OradpiConn *co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid logon handle");
-    /* m-6: Guard against half-torn-down connection */
+    /* Guard against half-torn-down connection */
     if (!co->conn)
-        return Oradpi_SetError(ip, (OradpiBase*)co, -1, "connection closed");
+        return Oradpi_SetError(ip, (OradpiBase *)co, -1, "connection closed");
     CONN_GATE_ENTER(co);
-    if (dpiConn_rollback(co->conn) != DPI_SUCCESS)
-    {
+    if (dpiConn_rollback(co->conn) != DPI_SUCCESS) {
         CONN_GATE_LEAVE(co);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase*)co, "dpiConn_rollback");
+        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_rollback");
     }
     CONN_GATE_LEAVE(co);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));

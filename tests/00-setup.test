@@ -130,6 +130,18 @@ namespace eval ::OratclTest {
         if {$rc} {return -options $opts $res}
         return [list $res $elapsed]
     }
+
+    # RSS probe (posix only) — returns current resident set in KB, or -1 on error.
+    # Moved here from 90-memory.test so any test file can use it.
+    proc rss_kb {} {
+        if {$::tcl_platform(platform) ne "unix"} {return -1}
+        if {![llength [info commands exec]]} {return -1}
+        set pid [pid]
+        if {[catch {exec ps -o rss= -p $pid} out]} {return -1}
+        set rss [string trim $out]
+        if {![string is integer -strict $rss]} {return -1}
+        return $rss
+    }
 }
 
 # Smoke: can we load the package at all?

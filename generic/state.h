@@ -30,81 +30,75 @@
 #define DPI_DEFAULT_FETCH_ARRAY_SIZE 100
 #endif
 
-/* M-2: Guard against ODPI-C versions that don't define this macro */
+/* Guard against ODPI-C versions that don't define this macro */
 #ifndef DPI_DEFAULT_PREFETCH_ROWS
 #define DPI_DEFAULT_PREFETCH_ROWS 2
 #endif
 
-/* FIX 4 (MAJOR): BindStoreMap and PendingMap are declared here so they can
- * be embedded directly in OradpiInterpState, replacing the separate
- * Tcl_SetAssocData registrations whose teardown order was unguaranteed. */
-typedef struct BindStoreMap
-{
+/* BindStoreMap and PendingMap are declared here for embedding
+ * directly in OradpiInterpState, ensuring deterministic teardown order. */
+typedef struct BindStoreMap {
     Tcl_HashTable byStmt;
 } BindStoreMap;
 
-typedef struct PendingMap
-{
+typedef struct PendingMap {
     Tcl_HashTable byStmt;
 } PendingMap;
 
 typedef struct GlobalConnRec GlobalConnRec;
 
-typedef struct OradpiMsg
-{
-    int rc;
-    Tcl_Obj* fn;
-    Tcl_Obj* sqlstate;
-    Tcl_Obj* action;
-    Tcl_Obj* error;
+typedef struct OradpiMsg {
+    int      rc;
+    Tcl_Obj *fn;
+    Tcl_Obj *sqlstate;
+    Tcl_Obj *action;
+    Tcl_Obj *error;
     uint64_t rows;
-    int sqltype;
+    int      sqltype;
     uint32_t peo;
-    int ocicode;
-    int recoverable;
-    int warning;
+    int      ocicode;
+    int      recoverable;
+    int      warning;
     uint32_t offset;
 } OradpiMsg;
 
-typedef struct OradpiBase
-{
-    Tcl_Obj* name;
+typedef struct OradpiBase {
+    Tcl_Obj  *name;
     OradpiMsg msg;
 } OradpiBase;
 
-typedef struct OradpiConn
-{
-    OradpiBase base;
-    dpiConn* conn;
-    dpiPool* pool;
-    int autocommit;
+typedef struct OradpiConn {
+    OradpiBase     base;
+    dpiConn       *conn;
+    dpiPool       *pool;
+    int            autocommit;
 
     /* Connection-level configuration */
-    uint32_t stmtCacheSize;
-    uint32_t fetchArraySize;
-    uint32_t prefetchRows;
-    uint32_t callTimeout;
-    int inlineLobs;
+    uint32_t       stmtCacheSize;
+    uint32_t       fetchArraySize;
+    uint32_t       prefetchRows;
+    uint32_t       callTimeout;
+    int            inlineLobs;
 
     /* Cached encoding string from ODPI (avoids per-bind round-trip) */
-    char* cachedEncoding;
+    char          *cachedEncoding;
 
     /* Driver-side failover policy (round-trippable) */
-    uint32_t foMaxAttempts;
-    uint32_t foBackoffMs;
-    double foBackoffFactor;
-    uint32_t foErrorClasses;
-    uint32_t foDebounceMs; /* debounce window for coalescing callbacks */
+    uint32_t       foMaxAttempts;
+    uint32_t       foBackoffMs;
+    double         foBackoffFactor;
+    uint32_t       foErrorClasses;
+    uint32_t       foDebounceMs; /* debounce window for coalescing callbacks */
 
     /* Failover callback + dispatch context */
-    Tcl_Obj* failoverCallback;
-    Tcl_Interp* ownerIp;
-    Tcl_ThreadId ownerTid;
+    Tcl_Obj       *failoverCallback;
+    Tcl_Interp    *ownerIp;
+    Tcl_ThreadId   ownerTid;
 
     /* Coalescing state */
     Tcl_TimerToken foTimer;
-    int foTimerScheduled;
-    Tcl_Obj* foPendingMsg;
+    int            foTimerScheduled;
+    Tcl_Obj       *foPendingMsg;
 
     /* Cross-interp adoption control:
        - ownerClose: the interpreter that created the connection performs
@@ -115,58 +109,54 @@ typedef struct OradpiConn
          across the owner wrapper, adopted wrappers, and async workers.
        - Callers must use Oradpi_ConnGateEnter/Leave (or the CONN_GATE_* macros)
          instead of locking any per-wrapper field directly. */
-    int ownerClose;
-    GlobalConnRec* shared; /* shared per-dpiConn gate and adoption record */
-    int adopted;           /* nonzero if this handle was adopted from another interp */
+    int            ownerClose;
+    GlobalConnRec *shared;  /* shared per-dpiConn gate and adoption record */
+    int            adopted; /* nonzero if this handle was adopted from another interp */
 } OradpiConn;
 
-typedef struct OradpiStmt
-{
-    OradpiBase base;
-    OradpiConn* owner;
-    dpiStmt* stmt;
-    uint32_t fetchArray;
-    uint32_t prefetchRows; /* per-statement override; 0 = use connection default */
+typedef struct OradpiStmt {
+    OradpiBase  base;
+    OradpiConn *owner;
+    dpiStmt    *stmt;
+    uint32_t    fetchArray;
+    uint32_t    prefetchRows; /* per-statement override; 0 = use connection default */
 
-    uint32_t numCols;
-    int defined;
+    uint32_t    numCols;
+    int         defined;
 } OradpiStmt;
 
-typedef struct OradpiLob
-{
-    OradpiBase base;
-    dpiLob* lob;
-    GlobalConnRec* shared; /* shared per-dpiConn gate for serializing LOB I/O */
+typedef struct OradpiLob {
+    OradpiBase     base;
+    dpiLob        *lob;
+    GlobalConnRec *shared; /* shared per-dpiConn gate for serializing LOB I/O */
 } OradpiLob;
 
-typedef struct OradpiInterpState
-{
-    Tcl_Interp* ip;
+typedef struct OradpiInterpState {
+    Tcl_Interp   *ip;
     Tcl_HashTable conns;
     Tcl_HashTable stmts;
     Tcl_HashTable lobs;
-    /* FIX 4 (MAJOR): Embedded instead of separate AssocData registrations.
-     * Teardown is now driven by Oradpi_DeleteInterpData in the correct phase
-     * order; no more unguaranteed inter-assoc deletion ordering. */
-    BindStoreMap bindStoreMap;
-    PendingMap   pendingMap;
+    /* Embedded in OradpiInterpState so Oradpi_DeleteInterpData
+     * controls teardown in the correct phase order. */
+    BindStoreMap  bindStoreMap;
+    PendingMap    pendingMap;
 } OradpiInterpState;
 
-OradpiLob* Oradpi_LookupLob(Tcl_Interp* ip, Tcl_Obj* nameObj);
+OradpiLob *Oradpi_LookupLob(Tcl_Interp *ip, Tcl_Obj *nameObj);
 
 /* Shared adopted-connection gate APIs. */
-void Oradpi_ConnGateEnter(OradpiConn* co);
-int Oradpi_ConnGateEnterTimed(OradpiConn* co, int timeoutMs);
-void Oradpi_ConnGateLeave(OradpiConn* co);
-void Oradpi_ConnBreak(OradpiConn* co);
+void       Oradpi_ConnGateEnter(OradpiConn *co);
+int        Oradpi_ConnGateEnterTimed(OradpiConn *co, int timeoutMs);
+void       Oradpi_ConnGateLeave(OradpiConn *co);
+void       Oradpi_ConnBreak(OradpiConn *co);
 
-void Oradpi_SharedConnAddRef(GlobalConnRec* gr);
-void Oradpi_SharedConnRelease(GlobalConnRec* gr);
-void Oradpi_SharedConnGateEnter(GlobalConnRec* gr);
-int Oradpi_SharedConnGateEnterTimed(GlobalConnRec* gr, int timeoutMs);
-void Oradpi_SharedConnGateLeave(GlobalConnRec* gr);
-void Oradpi_SharedConnBreak(GlobalConnRec* gr, dpiConn* conn);
-void Oradpi_SharedConnSyncBehavior(OradpiConn* co);
-void* Oradpi_ConnGateToken(OradpiConn* co);
+void       Oradpi_SharedConnAddRef(GlobalConnRec *gr);
+void       Oradpi_SharedConnRelease(GlobalConnRec *gr);
+void       Oradpi_SharedConnGateEnter(GlobalConnRec *gr);
+int        Oradpi_SharedConnGateEnterTimed(GlobalConnRec *gr, int timeoutMs);
+void       Oradpi_SharedConnGateLeave(GlobalConnRec *gr);
+void       Oradpi_SharedConnBreak(GlobalConnRec *gr, dpiConn *conn);
+void       Oradpi_SharedConnSyncBehavior(OradpiConn *co);
+void      *Oradpi_ConnGateToken(OradpiConn *co);
 
 #endif /* ORATCL_ODPI_STATE_H */

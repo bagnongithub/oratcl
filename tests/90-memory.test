@@ -5,15 +5,7 @@ package require tcltest 2.5
 namespace import ::tcltest::*
 source [file join [file dirname [info script]] 00-setup.test]
 
-proc ::OratclTest::rss_kb {} {
-    if {$::tcl_platform(platform) ne "unix"} {return -1}
-    if {![llength [info commands exec]]} {return -1}
-    set pid [pid]
-    if {[catch {exec ps -o rss= -p $pid} out]} {return -1}
-    set rss [string trim $out]
-    if {![string is integer -strict $rss]} {return -1}
-    return $rss
-}
+# rss_kb is defined in 00-setup.test (shared across all test files)
 
 test 90-1.0 {open/close many statements RSS bounded} -constraints {have_connect posix memory} -body {
     ::OratclTest::with_connection L {

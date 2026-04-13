@@ -29,52 +29,49 @@
  * Forward Declarations
  * ========================================================================== */
 
-int Oradpi_DpiContextEnsure(Tcl_Interp* ip);
-static void Oradpi_ProcessExit(void* unused);
-static void Oratcl_InterpDeleteProc(void* clientData, Tcl_Interp* ip);
-static void RegisterCommands(Tcl_Interp* ip);
-static int Oradpi_Cmd_InternalConnGateId(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[]);
-DLLEXPORT int oratcl_Init(Tcl_Interp* ip);
-DLLEXPORT int oratcl_SafeInit(Tcl_Interp* ip);
+int              Oradpi_DpiContextEnsure(Tcl_Interp *ip);
+static void      Oradpi_ProcessExit(void *unused);
+static void      Oratcl_InterpDeleteProc(void *clientData, Tcl_Interp *ip);
+static void      RegisterCommands(Tcl_Interp *ip);
+static int       Oradpi_Cmd_InternalConnGateId(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]);
+DLLEXPORT int    oratcl_Init(Tcl_Interp *ip);
+DLLEXPORT int    oratcl_SafeInit(Tcl_Interp *ip);
 
 /* ------------------------------------------------------------------------- *
  * Process-global Tcl/ODPI state
  * ------------------------------------------------------------------------- */
 
-dpiContext* Oradpi_GlobalDpiContext = NULL;
+dpiContext      *Oradpi_GlobalDpiContext = NULL;
 /* gCtxMutex: protects Oradpi_GlobalDpiContext and gExitHookRegistered.
  * Lock ordering: acquire gCtxMutex before any other module mutex. */
 static Tcl_Mutex gCtxMutex; /* zero-initialized; auto-created by Tcl on first lock */
-static int gExitHookRegistered = 0;
+static int       gExitHookRegistered = 0;
 
-static void Oradpi_ProcessExit(void* unused)
-{
+static void      Oradpi_ProcessExit(void *unused) {
     (void)unused;
     /* Two-phase teardown: swap the global pointer to a local under the lock,
      * then destroy outside the lock.  This avoids calling into ODPI-C while
      * holding gCtxMutex, which could deadlock if ODPI's own teardown path ever
      * tries to acquire a mutex that a thread is holding while waiting on ours. */
-    dpiContext* ctx = NULL;
+    dpiContext *ctx = NULL;
     Tcl_MutexLock(&gCtxMutex);
-    ctx = Oradpi_GlobalDpiContext;
+    ctx                     = Oradpi_GlobalDpiContext;
     Oradpi_GlobalDpiContext = NULL;
     Tcl_MutexUnlock(&gCtxMutex);
     if (ctx)
         dpiContext_destroy(ctx);
 }
 
-dpiContext* Oradpi_GetDpiContext(void)
-{
-    dpiContext* ctx = NULL;
+dpiContext *Oradpi_GetDpiContext(void) {
+    dpiContext *ctx = NULL;
     Tcl_MutexLock(&gCtxMutex);
     ctx = Oradpi_GlobalDpiContext;
     Tcl_MutexUnlock(&gCtxMutex);
     return ctx;
 }
 
-int Oradpi_CaptureODPIError(dpiErrorInfo* ei)
-{
-    dpiContext* ctx = Oradpi_GetDpiContext();
+int Oradpi_CaptureODPIError(dpiErrorInfo *ei) {
+    dpiContext *ctx = Oradpi_GetDpiContext();
     if (!ctx || !ei)
         return 0;
     memset(ei, 0, sizeof(*ei));
@@ -82,26 +79,21 @@ int Oradpi_CaptureODPIError(dpiErrorInfo* ei)
     return 1;
 }
 
-int Oradpi_DpiContextEnsure(Tcl_Interp* ip)
-{
+int Oradpi_DpiContextEnsure(Tcl_Interp *ip) {
     Tcl_MutexLock(&gCtxMutex);
-    if (!Oradpi_GlobalDpiContext)
-    {
+    if (!Oradpi_GlobalDpiContext) {
         dpiErrorInfo ei;
-        if (dpiContext_create(DPI_MAJOR_VERSION, DPI_MINOR_VERSION, &Oradpi_GlobalDpiContext, &ei) != DPI_SUCCESS)
-        {
+        if (dpiContext_create(DPI_MAJOR_VERSION, DPI_MINOR_VERSION, &Oradpi_GlobalDpiContext, &ei) != DPI_SUCCESS) {
             Tcl_MutexUnlock(&gCtxMutex);
-            if (ip)
-            {
-                Tcl_Obj* msg = Tcl_NewStringObj("oratcl: dpiContext_create failed: ", -1);
+            if (ip) {
+                Tcl_Obj *msg = Tcl_NewStringObj("oratcl: dpiContext_create failed: ", -1);
                 if (ei.message && ei.messageLength > 0)
                     Tcl_AppendToObj(msg, ei.message, (Tcl_Size)ei.messageLength);
                 Tcl_SetObjResult(ip, msg);
             }
             return TCL_ERROR;
         }
-        if (!gExitHookRegistered)
-        {
+        if (!gExitHookRegistered) {
             Tcl_CreateExitHandler(Oradpi_ProcessExit, NULL);
             gExitHookRegistered = 1;
         }
@@ -110,14 +102,12 @@ int Oradpi_DpiContextEnsure(Tcl_Interp* ip)
     return TCL_OK;
 }
 
-/* m-1: Bare-name registration (e.g., "oralogon" in ::) is preserved for backward
+/* Bare-name registration (e.g., "oralogon" in ::) is preserved for backward
  * compatibility with existing oratcl scripts.  New code should use the
  * namespaced form (::oratcl::oralogon) via [namespace import ::oratcl::*]. */
-static void RegisterCommand(Tcl_Interp* ip, Tcl_Namespace* nsPtr, const char* name, Tcl_ObjCmdProc2* proc)
-{
+static void RegisterCommand(Tcl_Interp *ip, Tcl_Namespace *nsPtr, const char *name, Tcl_ObjCmdProc2 *proc) {
     Tcl_CreateObjCommand2(ip, name, proc, NULL, NULL);
-    if (nsPtr)
-    {
+    if (nsPtr) {
         Tcl_DString ds;
         Tcl_DStringInit(&ds);
         Tcl_DStringAppend(&ds, ORATCL_NAMESPACE, -1);
@@ -131,25 +121,22 @@ static void RegisterCommand(Tcl_Interp* ip, Tcl_Namespace* nsPtr, const char* na
 /* Internal test hook: expose the shared connection-gate identity for a
  * connection handle.  This is intentionally registered only in the internal
  * namespace and is not exported. */
-static int Oradpi_Cmd_InternalConnGateId(void* cd, Tcl_Interp* ip, Tcl_Size objc, Tcl_Obj* const objv[])
-{
+static int Oradpi_Cmd_InternalConnGateId(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     (void)cd;
-    if (objc != 2)
-    {
+    if (objc != 2) {
         Tcl_WrongNumArgs(ip, 1, objv, "connection-handle");
         return TCL_ERROR;
     }
-    OradpiConn* co = Oradpi_LookupConn(ip, objv[1]);
+    OradpiConn *co = Oradpi_LookupConn(ip, objv[1]);
     if (!co)
         return Oradpi_SetError(ip, NULL, -1, "invalid connection handle");
     Tcl_SetObjResult(ip, Tcl_ObjPrintf("%p", Oradpi_ConnGateToken(co)));
     return TCL_OK;
 }
 
-static void RegisterCommands(Tcl_Interp* ip)
-{
-    Tcl_Namespace* nsPtr = Tcl_FindNamespace(ip, ORATCL_NAMESPACE, NULL, 0);
-    Tcl_Namespace* internalNs = Tcl_FindNamespace(ip, ORATCL_NAMESPACE "::internal", NULL, 0);
+static void RegisterCommands(Tcl_Interp *ip) {
+    Tcl_Namespace *nsPtr      = Tcl_FindNamespace(ip, ORATCL_NAMESPACE, NULL, 0);
+    Tcl_Namespace *internalNs = Tcl_FindNamespace(ip, ORATCL_NAMESPACE "::internal", NULL, 0);
     if (!nsPtr)
         nsPtr = Tcl_CreateNamespace(ip, ORATCL_NAMESPACE, NULL, NULL);
     if (!internalNs)
@@ -192,37 +179,33 @@ static void RegisterCommands(Tcl_Interp* ip)
 
 #define ORATCL_INTERP_MARK "oradpi.loaded"
 
-static void Oratcl_InterpDeleteProc(void* clientData, Tcl_Interp* ip)
-{
+static void Oratcl_InterpDeleteProc(void *clientData, Tcl_Interp *ip) {
     (void)clientData;
     (void)ip;
     /* Intentionally empty: actual cleanup is handled by the AssocData delete
      * proc registered under the "oradpi" key (Oradpi_DeleteInterpData in
      * state.c), which performs phased teardown of all per-interp handles.
      * BindStoreMap and PendingMap are embedded in OradpiInterpState and torn
-     * down as part of that same phase sequence — they no longer have separate
-     * AssocData entries.  This proc exists solely as the delete callback for
+     * down as part of that same phase sequence and share the
+     * OradpiInterpState lifetime.  This proc exists solely as the delete callback for
      * the ORATCL_INTERP_MARK sentinel that prevents double-registration of
      * commands when the package is loaded more than once in the same interp. */
 }
 
-DLLEXPORT int oratcl_Init(Tcl_Interp* ip)
-{
+DLLEXPORT int oratcl_Init(Tcl_Interp *ip) {
     if (Tcl_InitStubs(ip, ORATCL_TCL_MIN, 0) == NULL)
         return TCL_ERROR;
     if (Oradpi_DpiContextEnsure(ip) != TCL_OK)
         return TCL_ERROR;
 
-    if (Tcl_GetAssocData(ip, ORATCL_INTERP_MARK, NULL) == NULL)
-    {
+    if (Tcl_GetAssocData(ip, ORATCL_INTERP_MARK, NULL) == NULL) {
         RegisterCommands(ip);
-        Tcl_SetAssocData(ip, ORATCL_INTERP_MARK, Oratcl_InterpDeleteProc, (void*)1);
+        Tcl_SetAssocData(ip, ORATCL_INTERP_MARK, Oratcl_InterpDeleteProc, (void *)1);
     }
     return Tcl_PkgProvide(ip, "oratcl", ORATCL_VERSION);
 }
 
-DLLEXPORT int oratcl_SafeInit(Tcl_Interp* ip)
-{
+DLLEXPORT int oratcl_SafeInit(Tcl_Interp *ip) {
     if (Tcl_InitStubs(ip, ORATCL_TCL_MIN, 0) == NULL)
         return TCL_ERROR;
     Tcl_SetObjResult(ip, Tcl_NewStringObj("oratcl: cannot load into a safe interpreter (database access not permitted)", -1));
