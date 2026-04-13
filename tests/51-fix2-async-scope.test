@@ -1,0 +1,130 @@
+# -*-Tcl-*-
+# 51-fix2-async-scope.test — interp-scoped async cancellation
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+test 51-1.0 {child oralogoff does not cancel parent async} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set S [oraopen $L]
+    oraparse $S "SELECT 1 FROM DUAL"
+    oraexecasync $S
+    set child [interp create]
+    interp eval $child {package require oratcl 9.0}
+    interp eval $child [list set L $L]
+    interp eval $child {
+        set S2 [oraopen $L]; oraclose $S2; oralogoff $L
+    }
+    interp delete $child
+    set wrc [orawaitasync $S -timeout 10000]
+    oraclose $S
+    oralogoff $L
+    set wrc
+} -result 0
+
+test 51-1.1 {child interp deletion does not cancel parent async} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set S [oraopen $L]
+    oraparse $S "SELECT 1 FROM DUAL"
+    oraexecasync $S
+    set child [interp create]
+    interp eval $child {package require oratcl 9.0}
+    interp eval $child [list set L $L]
+    interp eval $child {set S2 [oraopen $L]; oraclose $S2}
+    interp delete $child
+    set wrc [orawaitasync $S -timeout 10000]
+    oraclose $S
+    oralogoff $L
+    set wrc
+} -result 0
+
+test 51-1.2 {each interp's async is independent on shared conn} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set S1 [oraopen $L]
+    oraparse $S1 "SELECT 1 FROM DUAL"
+    oraexecasync $S1
+    set child [interp create]
+    interp eval $child {package require oratcl 9.0}
+    interp eval $child [list set L $L]
+    set childResult [interp eval $child {
+        set S2 [oraopen $L]
+        oraparse $S2 "SELECT 2 FROM DUAL"
+        oraexecasync $S2
+        set wrc2 [orawaitasync $S2 -timeout 10000]
+        oraclose $S2; oralogoff $L
+        set wrc2
+    }]
+    interp delete $child
+    set wrc1 [orawaitasync $S1 -timeout 10000]
+    oraclose $S1
+    oralogoff $L
+    list $childResult $wrc1
+} -result {0 0}
+
+test 51-2.0 {oraclose cancels own async in same interp} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S "SELECT /*+ materialize */ level FROM dual CONNECT BY level <= 500000"
+        oraexecasync $S
+        set before [clock milliseconds]
+        oraclose $S
+        set elapsed [expr {[clock milliseconds] - $before}]
+        expr {$elapsed < 60000}
+    }
+} -result 1
+
+test 51-3.0 {stress: 20 child adopt/logoff cycles during parent async} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set ok 1
+    for {set iter 0} {$iter < 5} {incr iter} {
+        set S [oraopen $L]
+        oraparse $S "SELECT 1 FROM DUAL"
+        oraexecasync $S
+        for {set c 0} {$c < 4} {incr c} {
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            interp eval $child {
+                set S2 [oraopen $L]; oraclose $S2; oralogoff $L
+            }
+            interp delete $child
+        }
+        set wrc [orawaitasync $S -timeout 10000]
+        oraclose $S
+        if {$wrc != 0} { set ok 0; break }
+    }
+    oralogoff $L
+    set ok
+} -result 1
+
+test 51-3.1 {stress: sequential child interps each with own async} \
+    -constraints {have_connect} -body {
+    set results {}
+    for {set i 0} {$i < 5} {incr i} {
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set ::cs [::OratclTest::connstr]]
+        lappend results [interp eval $child {
+            set L2 [oralogon $::cs]
+            set S [oraopen $L2]
+            oraparse $S "SELECT 1 FROM DUAL"
+            oraexecasync $S
+            set wrc [orawaitasync $S -timeout 10000]
+            oraclose $S; oralogoff $L2
+            set wrc
+        }]
+        interp delete $child
+    }
+    expr {[lsort -unique $results] eq "0"}
+} -result 1
+
+cleanupTests

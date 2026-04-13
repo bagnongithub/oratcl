@@ -1,0 +1,178 @@
+# -*-Tcl-*-
+# 50-fix1-fetch-reentrancy.test — orafetch reentrancy safety
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# 50-1.x  -command callback closes the statement mid-fetch
+
+test 50-1.0 {orafetch -command closes stmt on first row} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 5
+        set S [oraopen $L]
+        oraparse $S "SELECT id FROM $T ORDER BY id"
+        oraexec $S
+        # [list oraclose $S] captures the handle value so it works at global scope
+        set rc [catch {
+            orafetch $S -datavariable row -indexbynumber -command [list oraclose $S]
+        } err]
+        expr {$rc == 1}
+    }
+} -result 1
+
+test 50-1.1 {orafetch -command closes stmt after several rows} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 20
+        set ::_testS [oraopen $L]
+        oraparse $::_testS "SELECT id FROM $T ORDER BY id"
+        oraexec $::_testS
+        set ::_fetch_count 0
+        set rc [catch {
+            orafetch $::_testS -datavariable row -indexbynumber -command {
+                incr ::_fetch_count
+                if {$::_fetch_count >= 3} { oraclose $::_testS }
+            }
+        } err]
+        list $rc [expr {$::_fetch_count >= 3}]
+    }
+} -result {1 1}
+
+test 50-1.2 {orafetch -command {oralogoff} does not crash} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set ::_testL [oralogon [::OratclTest::connstr]]
+    set T [::OratclTest::mk_table $::_testL "(id NUMBER, val VARCHAR2(20))"]
+    ::OratclTest::insert_rows $::_testL $T 3
+    set ::_testS [oraopen $::_testL]
+    oraparse $::_testS "SELECT id FROM $T ORDER BY id"
+    oraexec $::_testS
+    set rc [catch {
+        orafetch $::_testS -datavariable row -indexbynumber -command {
+            oralogoff $::_testL
+        }
+    } err]
+    expr {$rc == 1}
+} -result 1
+
+# 50-2.x  Variable trace on -datavariable closes the statement
+
+test 50-2.0 {write trace on -datavariable fires oraclose} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 5
+        set ::_testS [oraopen $L]
+        oraparse $::_testS "SELECT id FROM $T ORDER BY id"
+        oraexec $::_testS
+        set traceCmd {apply {{args} { catch {oraclose $::_testS} }}}
+        trace add variable ::_traceRow write $traceCmd
+        set rc [catch {
+            orafetch $::_testS -datavariable ::_traceRow -indexbynumber
+        } err]
+        trace remove variable ::_traceRow write $traceCmd
+        catch {unset ::_traceRow}
+        expr {$rc == 0 || $rc == 1}
+    }
+} -result 1
+
+# 50-3.x  -command with TCL_BREAK / TCL_CONTINUE
+
+test 50-3.0 {-command returning break is clean} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 10
+        set S [oraopen $L]
+        oraparse $S "SELECT id FROM $T ORDER BY id"
+        oraexec $S
+        set ::_seen 0
+        orafetch $S -datavariable ::_row -indexbynumber -command {
+            incr ::_seen
+            if {$::_seen >= 3} { break }
+        }
+        oraclose $S
+        expr {$::_seen == 3}
+    }
+} -result 1
+
+test 50-3.1 {-command returning continue skips rows cleanly} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 10
+        set S [oraopen $L]
+        oraparse $S "SELECT id FROM $T ORDER BY id"
+        oraexec $S
+        set ::_kept 0
+        orafetch $S -datavariable ::_row -indexbynumber -command {
+            if {[lindex $::_row 0] % 2 == 0} { continue }
+            incr ::_kept
+        }
+        oraclose $S
+        expr {$::_kept == 5}
+    }
+} -result 1
+
+# 50-4.x  Stress
+
+test 50-4.0 {stress: 50 iterations of fetch-then-close-in-callback} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 10
+        set errors 0
+        for {set iter 0} {$iter < 50} {incr iter} {
+            set S [oraopen $L]
+            oraparse $S "SELECT id FROM $T ORDER BY id"
+            oraexec $S
+            set rc [catch {
+                orafetch $S -datavariable row -indexbynumber -command [list oraclose $S]
+            }]
+            if {$rc != 1} { incr errors }
+        }
+        set errors
+    }
+} -result 0
+
+test 50-4.1 {stress: fetch with break at varying row counts} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 20
+        set ok 1
+        for {set breakAt 1} {$breakAt <= 20} {incr breakAt} {
+            set S [oraopen $L]
+            oraparse $S "SELECT id FROM $T ORDER BY id"
+            oraexec $S
+            set ::_cnt 0
+            set ::_brk $breakAt
+            orafetch $S -datavariable ::_row -indexbynumber -command {
+                incr ::_cnt
+                if {$::_cnt >= $::_brk} { break }
+            }
+            oraclose $S
+            if {$::_cnt != $breakAt} { set ok 0; break }
+        }
+        set ok
+    }
+} -result 1
+
+test 50-4.2 {stress: fetch with -resultvariable collects all rows} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 100
+        set S [oraopen $L]
+        oraparse $S "SELECT id FROM $T ORDER BY id"
+        oraexec $S
+        orafetch $S -resultvariable allRows
+        oraclose $S
+        llength $allRows
+    }
+} -result 100
+
+cleanupTests

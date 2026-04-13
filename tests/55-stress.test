@@ -1,0 +1,498 @@
+# -*-Tcl-*-
+# 55-stress.test — stress tests for multi-interp/multi-thread safety
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# 55-1.x  Multi-interp stress
+
+test 55-1.0 {stress: 50 rapid child interp create/adopt/query/destroy} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 5
+        set ok 1
+        for {set i 0} {$i < 50} {incr i} {
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            interp eval $child [list set T $T]
+            set val [interp eval $child {
+                set S [oraopen $L]
+                oraparse $S "SELECT COUNT(*) FROM $T"
+                oraexec $S
+                orafetch $S -datavariable row -indexbynumber
+                set v [lindex $row 0]
+                oraclose $S; oralogoff $L
+                set v
+            }]
+            interp delete $child
+            if {$val != 5} { set ok 0; break }
+        }
+        set ok
+    }
+} -result 1
+
+test 55-1.1 {stress: 10 concurrent child interps sharing one connection} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 3
+        set children {}
+        for {set i 0} {$i < 10} {incr i} {
+            set c [interp create]
+            interp eval $c {package require oratcl 9.0}
+            interp eval $c [list set L $L]
+            interp eval $c [list set T $T]
+            lappend children $c
+        }
+        set results {}
+        foreach c $children {
+            lappend results [interp eval $c {
+                set S [oraopen $L]
+                oraparse $S "SELECT COUNT(*) FROM $T"
+                oraexec $S
+                orafetch $S -datavariable row -indexbynumber
+                set v [lindex $row 0]
+                oraclose $S; oralogoff $L
+                set v
+            }]
+        }
+        foreach c $children { interp delete $c }
+        set S [oraopen $L]
+        oraparse $S "SELECT COUNT(*) FROM $T"
+        oraexec $S
+        orafetch $S -datavariable row -indexbynumber
+        set parentVal [lindex $row 0]
+        oraclose $S
+        list [lsort -unique $results] $parentVal
+    }
+} -result {3 3}
+
+test 55-1.2 {stress: interleaved adopt and owner operations} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        set ok 1
+        for {set i 0} {$i < 20} {incr i} {
+            set S [oraopen $L]
+            orasql $S "INSERT INTO $T VALUES ($i, 'owner_$i')" -commit
+            oraclose $S
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            interp eval $child [list set T $T]
+            set cnt [interp eval $child {
+                set S [oraopen $L]
+                oraparse $S "SELECT COUNT(*) FROM $T"
+                oraexec $S
+                orafetch $S -datavariable row -indexbynumber
+                set v [lindex $row 0]
+                oraclose $S; oralogoff $L
+                set v
+            }]
+            interp delete $child
+            if {$cnt < [expr {$i + 1}]} { set ok 0; break }
+        }
+        set ok
+    }
+} -result 1
+
+# 55-2.x  Multi-thread stress
+
+test 55-2.0 {stress: 8 threads each running 20 query cycles} \
+    -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 8} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    package require oratcl 9.0
+                    set L [oralogon $::env(ORATCL_CONNECT)]
+                    for {set n 0} {$n < 20} {incr n} {
+                        set S [oraopen $L]
+                        oraparse $S "SELECT 1 FROM DUAL"
+                        oraexec $S
+                        orafetch $S -datavariable r -indexbynumber
+                        oraclose $S
+                    }
+                    oralogoff $L
+                    set _rc 0
+                } finally { thread::exit $_rc }
+            }
+        }
+    }
+    set ok 1
+    foreach tid $tids {
+        if {[thread::join $tid] ne "0"} { set ok 0 }
+    }
+    set ok
+} -result 1
+
+test 55-2.1 {stress: 4 threads with async exec cycles} \
+    -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 4} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    package require oratcl 9.0
+                    set L [oralogon $::env(ORATCL_CONNECT)]
+                    set S [oraopen $L]
+                    oraparse $S "SELECT 1 FROM DUAL"
+                    for {set n 0} {$n < 30} {incr n} {
+                        oraexecasync $S
+                        set wrc [orawaitasync $S -timeout 10000]
+                        if {$wrc != 0} { error "async failed: $wrc" }
+                    }
+                    oraclose $S; oralogoff $L
+                    set _rc 0
+                } finally { thread::exit $_rc }
+            }
+        }
+    }
+    set ok 1
+    foreach tid $tids {
+        if {[thread::join $tid] ne "0"} { set ok 0 }
+    }
+    set ok
+} -result 1
+
+test 55-2.2 {stress: threads with DML + commit contention} \
+    -constraints {have_connect have_thread} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(tid NUMBER, seq NUMBER)"]
+        set cs [::OratclTest::connstr]
+        set tids {}
+        for {set i 0} {$i < 4} {incr i} {
+            set tid [thread::create -joinable]
+            lappend tids $tid
+            thread::send $tid [list set ::env(ORATCL_CONNECT) $cs]
+            thread::send $tid [list set ::T $T]
+            thread::send $tid [list set ::tid_num $i]
+            catch {
+                thread::send $tid {
+                    set _rc 1
+                    try {
+                        package require oratcl 9.0
+                        set L [oralogon $::env(ORATCL_CONNECT)]
+                        set S [oraopen $L]
+                        oraparse $S "INSERT INTO $::T VALUES (:tid, :seq)"
+                        for {set k 0} {$k < 50} {incr k} {
+                            orabind $S :tid $::tid_num :seq $k
+                            oraexec $S
+                        }
+                        oracommit $L; oraclose $S; oralogoff $L
+                        set _rc 0
+                    } finally { thread::exit $_rc }
+                }
+            }
+        }
+        set ok 1
+        foreach tid $tids {
+            if {[thread::join $tid] ne "0"} { set ok 0 }
+        }
+        set count [::OratclTest::count_rows $L $T]
+        list $ok [expr {$count == 200}]
+    }
+} -result {1 1}
+
+# 55-3.x  Thread + interp combinations
+
+test 55-3.0 {stress: each of 4 threads spawns 5 child interps} \
+    -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 4} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    for {set c 0} {$c < 5} {incr c} {
+                        set child [interp create]
+                        interp eval $child [list set ::env(ORATCL_CONNECT) $::env(ORATCL_CONNECT)]
+                        interp eval $child {
+                            package require oratcl 9.0
+                            set L [oralogon $::env(ORATCL_CONNECT)]
+                            set S [oraopen $L]
+                            oraparse $S {SELECT 1 FROM DUAL}
+                            oraexec $S
+                            orafetch $S -datavariable r -indexbynumber
+                            oraclose $S; oralogoff $L
+                        }
+                        interp delete $child
+                    }
+                    set _rc 0
+                } finally { thread::exit $_rc }
+            }
+        }
+    }
+    set ok 1
+    foreach tid $tids {
+        if {[thread::join $tid] ne "0"} { set ok 0 }
+    }
+    set ok
+} -result 1
+
+test 55-3.1 {stress: worker thread adopts parent connection} \
+    -constraints {have_connect have_thread} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 10
+        set tid [thread::create -joinable -preserved]
+        thread::send $tid [list set ::auto_path $::auto_path]
+        thread::send $tid [list set ::L $L]
+        thread::send $tid [list set ::T $T]
+        set result {}
+        thread::send -async $tid {
+            set rc [catch {
+                package require oratcl 9.0
+                set S [oraopen $::L]
+                oraparse $S "SELECT COUNT(*) FROM $::T"
+                oraexec $S
+                orafetch $S -datavariable row -indexbynumber
+                set val [lindex $row 0]
+                oraclose $S; oralogoff $::L
+                set val
+            } msg]
+            list $rc $msg
+        } result
+        vwait result
+        lassign $result rc val
+        thread::release $tid
+        thread::join $tid
+        if {$rc != 0} { error $val }
+        set val
+    }
+} -result 10
+
+# 55-4.x  Fetch + adoption + async combined stress
+
+test 55-4.0 {stress: owner fetch while child adopts and queries} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 50
+        set ok 1
+        for {set iter 0} {$iter < 10} {incr iter} {
+            set S [oraopen $L]
+            oraparse $S "SELECT id FROM $T ORDER BY id"
+            oraexec $S
+            orafetch $S -resultvariable ownerRows
+            oraclose $S
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            interp eval $child [list set T $T]
+            set childCount [interp eval $child {
+                set S [oraopen $L]
+                oraparse $S "SELECT COUNT(*) FROM $T"
+                oraexec $S
+                orafetch $S -datavariable row -indexbynumber
+                set v [lindex $row 0]
+                oraclose $S; oralogoff $L
+                set v
+            }]
+            interp delete $child
+            if {[llength $ownerRows] != 50 || $childCount != 50} {
+                set ok 0; break
+            }
+        }
+        set ok
+    }
+} -result 1
+
+test 55-4.1 {stress: interleaved async and sync on shared connection} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set ok 1
+    for {set iter 0} {$iter < 15} {incr iter} {
+        set S1 [oraopen $L]
+        oraparse $S1 "SELECT 1 FROM DUAL"
+        oraexec $S1
+        orafetch $S1 -datavariable row1 -indexbynumber
+        oraclose $S1
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set childVal [interp eval $child {
+            set S [oraopen $L]
+            oraparse $S "SELECT 2 FROM DUAL"
+            oraexecasync $S
+            set wrc [orawaitasync $S -timeout 10000]
+            if {$wrc == 0} {
+                orafetch $S -datavariable row -indexbynumber
+                set v [lindex $row 0]
+            } else { set v "async_fail" }
+            oraclose $S; oralogoff $L
+            set v
+        }]
+        interp delete $child
+        if {[lindex $row1 0] != 1 || $childVal != 2} {
+            set ok 0; break
+        }
+    }
+    oralogoff $L
+    set ok
+} -result 1
+
+# 55-5.x  Memory stability under stress (RSS)
+
+test 55-5.0 {stress: 100 adopt/destroy cycles RSS bounded} \
+    -constraints {have_connect posix memory} -body {
+    ::OratclTest::with_connection L {
+        set T0 [::OratclTest::rss_kb]
+        for {set i 0} {$i < 100} {incr i} {
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            interp eval $child {
+                set S [oraopen $L]
+                oraparse $S {SELECT 1 FROM DUAL}
+                oraexec $S
+                orafetch $S -datavariable r -indexbynumber
+                oraclose $S; oralogoff $L
+            }
+            interp delete $child
+        }
+        set T1 [::OratclTest::rss_kb]
+        expr {($T0 >= 0 && $T1 >= 0) ? ($T1 - $T0 < 30000) : 1}
+    }
+} -result 1
+
+test 55-5.1 {stress: 50 fetch-with-callback-close cycles RSS bounded} \
+    -constraints {have_connect posix memory} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L "(id NUMBER, val VARCHAR2(20))"]
+        ::OratclTest::insert_rows $L $T 5
+        set T0 [::OratclTest::rss_kb]
+        for {set i 0} {$i < 50} {incr i} {
+            set S [oraopen $L]
+            oraparse $S "SELECT id FROM $T ORDER BY id"
+            oraexec $S
+            catch {
+                orafetch $S -datavariable row -indexbynumber -command [list oraclose $S]
+            }
+        }
+        set T1 [::OratclTest::rss_kb]
+        expr {($T0 >= 0 && $T1 >= 0) ? ($T1 - $T0 < 20000) : 1}
+    }
+} -result 1
+
+test 55-5.2 {stress: 100 async submit/wait cycles RSS bounded} \
+    -constraints {have_connect posix memory} -body {
+    ::OratclTest::with_connection L {
+        set T0 [::OratclTest::rss_kb]
+        set S [oraopen $L]
+        oraparse $S "SELECT 1 FROM DUAL"
+        for {set i 0} {$i < 100} {incr i} {
+            oraexecasync $S
+            orawaitasync $S -timeout 10000
+        }
+        oraclose $S
+        set T1 [::OratclTest::rss_kb]
+        expr {($T0 >= 0 && $T1 >= 0) ? ($T1 - $T0 < 20000) : 1}
+    }
+} -result 1
+
+# 55-6.x  Destructive interleaving at scale
+
+test 55-6.0 {stress: alternating sync/async with adopt/destroy} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.0
+    set L [oralogon [::OratclTest::connstr]]
+    set ok 1
+    for {set iter 0} {$iter < 30} {incr iter} {
+        if {$iter % 2 == 0} {
+            set S [oraopen $L]
+            oraparse $S "SELECT $iter FROM DUAL"
+            oraexec $S
+            orafetch $S -datavariable row -indexbynumber
+            oraclose $S
+            if {[lindex $row 0] != $iter} { set ok 0; break }
+        } else {
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            interp eval $child [list set iter $iter]
+            set val [interp eval $child {
+                set S [oraopen $L]
+                oraparse $S "SELECT $iter FROM DUAL"
+                oraexecasync $S
+                set wrc [orawaitasync $S -timeout 10000]
+                if {$wrc == 0} {
+                    orafetch $S -datavariable row -indexbynumber
+                    set v [lindex $row 0]
+                } else { set v -1 }
+                oraclose $S; oralogoff $L
+                set v
+            }]
+            interp delete $child
+            if {$val != $iter} { set ok 0; break }
+        }
+    }
+    oralogoff $L
+    set ok
+} -result 1
+
+test 55-6.1 {stress: 4 threads doing fetch-close-in-callback} \
+    -constraints {have_connect have_thread} -body {
+    set tids {}
+    for {set i 0} {$i < 4} {incr i} {
+        set tid [thread::create -joinable]
+        lappend tids $tid
+        thread::send $tid [list set ::env(ORATCL_CONNECT) [::OratclTest::connstr]]
+        catch {
+            thread::send $tid {
+                set _rc 1
+                try {
+                    package require oratcl 9.0
+                    set L [oralogon $::env(ORATCL_CONNECT)]
+                    set T "ORATCL9_STHR_[pid]_[thread::id]"
+                    set S0 [oraopen $L]
+                    catch {orasql $S0 "DROP TABLE $T PURGE" -commit}
+                    orasql $S0 "CREATE TABLE $T (id NUMBER, val VARCHAR2(20))" -commit
+                    oraparse $S0 "INSERT INTO $T (id, val) VALUES (:id, :val)"
+                    for {set k 1} {$k <= 10} {incr k} {
+                        orabind $S0 :id $k :val "r$k"
+                        oraexec $S0
+                    }
+                    oracommit $L; oraclose $S0
+
+                    for {set n 0} {$n < 20} {incr n} {
+                        set S [oraopen $L]
+                        oraparse $S "SELECT id FROM $T ORDER BY id"
+                        oraexec $S
+                        catch {
+                            orafetch $S -datavariable row -indexbynumber \
+                                -command [list oraclose $S]
+                        }
+                    }
+                    set S [oraopen $L]
+                    catch {orasql $S "DROP TABLE $T PURGE" -commit}
+                    catch {oraclose $S}
+                    oralogoff $L
+                    set _rc 0
+                } finally { thread::exit $_rc }
+            }
+        }
+    }
+    set ok 1
+    foreach tid $tids {
+        if {[thread::join $tid] ne "0"} { set ok 0 }
+    }
+    set ok
+} -result 1
+
+cleanupTests

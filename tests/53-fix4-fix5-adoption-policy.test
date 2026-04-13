@@ -1,0 +1,137 @@
+# -*-Tcl-*-
+# 53-fix4-fix5-adoption-policy.test — adoption policy fixes
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# 53-1.x  Fix 4: failover callback on adopted handle
+
+test 53-1.0 {configure failover callback on adopted handle does not error} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set rc [interp eval $child {
+            set S [oraopen $L]; oraclose $S
+            set rc [catch {
+                oraconfig $L failovercallback {apply {{handle type msg} {}}}
+            } err]
+            oralogoff $L
+            set rc
+        }]
+        interp delete $child
+        set rc
+    }
+} -result 0
+
+test 53-1.1 {failover callback readable after set on adopted handle} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set hasCallback [interp eval $child {
+            set S [oraopen $L]; oraclose $S
+            oraconfig $L failovercallback myFoProc
+            set cb [oraconfig $L failovercallback]
+            oralogoff $L
+            expr {$cb ne ""}
+        }]
+        interp delete $child
+        set hasCallback
+    }
+} -result 1
+
+# 53-2.x  Fix 5: autocommit propagates to shared snapshot
+
+test 53-2.0 {autocommit change visible to new adopter} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraautocommit $L 0
+        oraautocommit $L 1
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set adopted_ac [interp eval $child {
+            set S [oraopen $L]; oraclose $S
+            dict get [orainfo $L] autocommit
+        }]
+        interp delete $child
+        set adopted_ac
+    }
+} -result 1
+
+test 53-2.1 {autocommit toggle propagates correctly} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set results {}
+        for {set v 0} {$v <= 1} {incr v} {
+            oraautocommit $L $v
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            lappend results [interp eval $child {
+                set S [oraopen $L]; oraclose $S
+                dict get [orainfo $L] autocommit
+            }]
+            interp delete $child
+        }
+        set results
+    }
+} -result {0 1}
+
+test 53-2.2 {multiple adopters see consistent autocommit} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraautocommit $L 1
+        set results {}
+        for {set i 0} {$i < 5} {incr i} {
+            set child [interp create]
+            interp eval $child {package require oratcl 9.0}
+            interp eval $child [list set L $L]
+            lappend results [interp eval $child {
+                set S [oraopen $L]; oraclose $S
+                dict get [orainfo $L] autocommit
+            }]
+            interp delete $child
+        }
+        expr {[lsort -unique $results] eq "1"}
+    }
+} -result 1
+
+# 53-3.x  Config sync for other behavioral fields
+
+test 53-3.0 {fetchArraySize change visible to new adopter} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L fetcharraysize 500
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set adopted_fas [interp eval $child {
+            set S [oraopen $L]; oraclose $S
+            oraconfig $L fetcharraysize
+        }]
+        interp delete $child
+        expr {$adopted_fas == 500}
+    }
+} -result 1
+
+test 53-3.1 {inlineLobs change visible to new adopter} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L inlineLobs 1
+        set child [interp create]
+        interp eval $child {package require oratcl 9.0}
+        interp eval $child [list set L $L]
+        set adopted_il [interp eval $child {
+            set S [oraopen $L]; oraclose $S
+            oraconfig $L inlineLobs
+        }]
+        interp delete $child
+        set adopted_il
+    }
+} -result 1
+
+cleanupTests
