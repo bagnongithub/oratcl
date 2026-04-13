@@ -2,8 +2,8 @@
 <meta charset='utf-8'>
 <title>ORATCL</title>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
-<meta name='date' content='September 2025'>
-<meta name='generator' content='oratcl 9.0 (ODPI-C 5.6.2)'>
+<meta name='date' content='April 2026'>
+<meta name='generator' content='oratcl 9.1 (ODPI-C 5.6.4)'>
 <style>
 :root{
   --bg: #ffffff;
@@ -57,7 +57,7 @@ ul { margin: 10px 0 10px 20px; }
 <div class='container'>
 <header class='header'>
 <h1 id='top'>ORATCL</h1>
-<div class='meta'>Tcl Extension oratcl 9.0 (ODPI-C 5.6.2) September 2025</div>
+<div class='meta'>Tcl Extension oratcl 9.1 (ODPI-C 5.6.4) April 2026</div>
 </header>
 <section class='toc-index-wrap'>
 <nav class='toc-top'>
@@ -79,25 +79,29 @@ ul { margin: 10px 0 10px 20px; }
 <li><a href='#oraautocommit-logon-handle-01'>oraautocommit logon-handle 0|1</a></li>
 <li><a href='#orabind-stmt-name-value'>orabind stmt :name value ...</a></li>
 <li><a href='#orabindexec-stmt--commit--arraydml-name-list'>orabindexec stmt ?-commit? ?-arraydml? :name list ...</a></li>
+<li><a href='#orabreak-logon-handle'>orabreak logon-handle</a></li>
 <li><a href='#oracols-stmt'>oracols stmt</a></li>
+<li><a href='#oracommit-logon-handle'>oracommit logon-handle</a></li>
+<li><a href='#oraconfig-handle'>oraconfig handle ?name ?value??</a></li>
 <li><a href='#oradesc-logon-handle-object-name'>oradesc logon-handle object-name</a></li>
 <li><a href='#oraexec-stmt--commit'>oraexec stmt ?-commit?</a></li>
 <li><a href='#oraexecasync-stmt--commit'>oraexecasync stmt ?-commit?</a></li>
 <li><a href='#orafetch-stmt-options'>orafetch stmt ?options?</a></li>
 <li><a href='#orainfo-logon-handle'>orainfo logon-handle</a></li>
-<li><a href='#oralob-read-lob-handle-offset-amount'>oralob read lob-handle offset amount</a></li>
+<li><a href='#oralob-subcmd-lob-handle'>oralob size|read|write|trim|close lob-handle</a></li>
 <li><a href='#oralogoff-logon-handle'>oralogoff logon-handle</a></li>
 <li><a href='#oralogon-connect-string-options'>oralogon connect-string ?options?</a></li>
+<li><a href='#oramsg-handle-field'>oramsg handle field</a></li>
 <li><a href='#oraopen-logon-handle--alias-orastmt'>oraopen logon-handle  (alias: orastmt)</a></li>
 <li><a href='#oraplexec-stmt-plsql--commit'>oraplexec stmt {pl/sql} ?-commit?</a></li>
+<li><a href='#orarollback-logon-handle'>orarollback logon-handle</a></li>
 <li><a href='#orasql-stmt-sql--parseonly--commit'>orasql stmt sql ?-parseonly? ?-commit?</a></li>
 <li><a href='#orawaitasync-stmt--timeout-ms'>orawaitasync stmt ?-timeout ms?</a></li>
 </ul>
 </nav>
 </section>
 <h2 id='name'>NAME</h2>
-<p>oratcl - Tcl 9 interface to Oracle via ODPI-C 5.6.2</p>
-<p></p>
+<p>oratcl &mdash; Tcl 9 interface to Oracle via ODPI-C 5.6.4</p>
 <h2 id='synopsis'>SYNOPSIS</h2>
 <pre><code>oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|forceget|timedwait? ?-failovercallback proc?
 oralogoff logon-handle
@@ -127,6 +131,8 @@ orafetch statement-handle
 oracols statement-handle
 oradesc logon-handle object-name
 
+oraconfig handle ?name ?value??
+
 oramsg  handle rc|error|rows|peo|ocicode|sqltype|fn|action|sqlstate|recoverable|warning|offset|all|allx
 
 oralob  size|read|write|trim|close lob-handle ?args...?
@@ -138,33 +144,34 @@ orabreak     logon-handle         # cancel active call
 
 oraexecasync  statement-handle ?-commit?
 orawaitasync  statement-handle ?-timeout milliseconds?</code></pre>
-<p></p>
 <h2 id='description'>DESCRIPTION</h2>
-<p></p>
-<p>oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
+<p>oratcl 9.1 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
 command signatures use <b>Tcl_Size</b> and are thread/multi-interp safe. One ODPI context is created per
-process; per-interp state (handles, registries) is created on each load. Async execution uses per-statement
-workers with proper addRef/release of underlying dpi handles.</p>
-<p></p>
+process; per-interp state (handles, registries) is created on each load.</p>
+<p>Async execution uses a persistent thread pool with reference-counted entries and a shared work queue.
+All operations on a physical Oracle connection are serialized through a shared per-connection gate,
+ensuring safe concurrent use across interpreter threads and async workers.</p>
+<p>All commands are registered both at global scope (backward compatibility) and under the <b>::oratcl</b>
+namespace. Use <code>namespace import ::oratcl::*</code> to access the namespaced forms.</p>
 <h2 id='commands'>COMMANDS</h2>
 <h3 id='connection'>Connection</h3>
-<div class='indent'>
-<p><b>&quot;-pool</b> Create/acquire via session pool.</p>
-<p><b>&quot;-homogeneous</b> Homogeneous pool (default 1).</p>
-<p><b>&quot;-getmode</b> wait|nowait|forceget|timedwait Pool get mode.</p>
-<p><b>&quot;-failovercallback</b> Register a Tcl proc invoked on recoverable errors (driver-side failover).</p>
-</div>
-<p>Returns a logon-handle (e.g. "oraL1").</p>
-<p></p>
 <dl class='deflist'>
 <dt id='oralogon-connect-string-options'><b>oralogon</b> <i>connect-string</i> ?options?</dt>
-<dd><p>Connect using either username/password@connect_identifier, or external auth (leave user/pw empty). Options:</p></dd>
+<dd><p>Connect using either username/password@connect_identifier, or external auth (leave user/pw empty).
+Quoted passwords with backslash escapes are supported: <code>user/"pass\"word"@db</code>. Options:</p>
+<div class='indent'>
+<p><b>-pool</b> <i>min max incr</i> &mdash; Create/acquire via session pool.</p>
+<p><b>-homogeneous</b> 0|1 &mdash; Homogeneous pool (default 1).</p>
+<p><b>-getmode</b> wait|nowait|forceget|timedwait &mdash; Pool get mode.</p>
+<p><b>-failovercallback</b> <i>proc</i> &mdash; Register a Tcl proc invoked on recoverable errors (driver-side failover). Can also be set later via <b>oraconfig</b>.</p>
+</div>
+<p>Returns a logon-handle (e.g. "oraL1").</p></dd>
 <dt id='oralogoff-logon-handle'><b>oralogoff</b> <i>logon-handle</i></dt>
-<dd><p>Close the connection (see <b>ORA_MSG</b> behavior for error reporting).</p></dd>
+<dd><p>Close the connection. Cancels pending async operations, releases associated LOBs and statements in phased order.</p></dd>
 <dt id='oraautocommit-logon-handle-01'><b>oraautocommit</b> <i>logon-handle</i> 0|1</dt>
-<dd><p>Set autocommit. DML/PLSQL commit on success when enabled or when <b>-commit</b> is supplied to exec commands.</p></dd>
+<dd><p>Set autocommit. DML/PLSQL commit on success when enabled or when <b>-commit</b> is supplied to exec commands. The change is propagated to the shared adoption record.</p></dd>
 <dt id='orainfo-logon-handle'><b>orainfo</b> <i>logon-handle</i></dt>
-<dd><p>Return a dict with the current connection info. <b>Currently</b> it returns <b>autocommit</b> only.</p></dd>
+<dd><p>Return a dict with the current connection info. Currently returns <b>autocommit</b> only.</p></dd>
 </dl>
 <h3 id='statements--execution'>Statements &amp; execution</h3>
 <dl class='deflist'>
@@ -173,51 +180,84 @@ workers with proper addRef/release of underlying dpi handles.</p>
 <dt id='orasql-stmt-sql--parseonly--commit'><b>orasql</b> <i>stmt</i> <i>sql</i> ?<b>-parseonly</b>? ?<b>-commit</b>?</dt>
 <dd><p>Parse and, unless <b>-parseonly</b>, execute once. Clears the per-statement stored-bind cache if text changes.</p></dd>
 <dt id='oraexec-stmt--commit'><b>oraexec</b> <i>stmt</i> ?<b>-commit</b>?</dt>
-<dd><p>Execute the already-parsed statement (single execution).</p></dd>
+<dd><p>Execute the already-parsed statement (single execution). Supports driver-side failover with configurable retry/backoff.</p></dd>
 <dt id='oraplexec-stmt-plsql--commit'><b>oraplexec</b> <i>stmt</i> <i>{pl/sql}</i> ?<b>-commit</b>?</dt>
 <dd><p>Prepare and execute a PL/SQL block.</p></dd>
 <dt id='orabind-stmt-name-value'><b>orabind</b> <i>stmt</i> <i>:name value</i> ...</dt>
-<dd><p>Bind scalars by name. LOB type is inferred by name and/or value representation.</p></dd>
+<dd><p>Bind scalars by name. LOB type is inferred by name suffix (<code>_blob</code>, <code>_clob</code>) and/or value representation.</p></dd>
 <dt id='orabindexec-stmt--commit--arraydml-name-list'><b>orabindexec</b> <i>stmt</i> ?<b>-commit</b>? ?<b>-arraydml</b>? <i>:name list</i> ...</dt>
-<dd><p>Array DML with name→list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().</p></dd>
+<dd><p>Array DML with name&rarr;list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().</p></dd>
 </dl>
 <h3 id='fetching'>Fetching</h3>
 <dl class='deflist'>
 <dt id='orafetch-stmt-options'><b>orafetch</b> <i>stmt</i> ?options?</dt>
-<dd><p>Fetches up to <b>-max N</b> rows and returns <b>0</b> while data remains, or <b>1403</b> at end-of-data. Use <b>-returnrows</b> or <b>-resultvariable</b> to obtain a list of rows; <b>-asdict</b> returns dicts keyed by column names.</p></dd>
+<dd><p>Fetches up to <b>-max N</b> rows and returns <b>0</b> while data remains, or <b>1403</b> at end-of-data.
+Use <b>-returnrows</b> or <b>-resultvariable</b> to obtain a list of rows; <b>-asdict</b> returns dicts keyed by column names.</p>
+<p>Fetched data is deep-copied into local snapshots so that <b>-command</b> callbacks can safely issue other
+database operations (including closing the statement) without deadlock. Column names are uppercased with
+Unicode-aware conversion.</p></dd>
 </dl>
 <h3 id='metadata'>Metadata</h3>
 <dl class='deflist'>
 <dt id='oracols-stmt'><b>oracols</b> <i>stmt</i></dt>
-<dd><p>Return column names of the current query.</p></dd>
+<dd><p>Return column names of the current query. Names are uppercased with Unicode-aware conversion.</p></dd>
 <dt id='oradesc-logon-handle-object-name'><b>oradesc</b> <i>logon-handle</i> <i>object-name</i></dt>
 <dd><p>Return <b>{name type}</b> pairs for the columns of the given table or view.</p></dd>
 </dl>
 <h3 id='lobs'>LOBs</h3>
 <dl class='deflist'>
-<dt id='oralob-read-lob-handle-offset-amount'><b>oralob read</b> <i>lob-handle</i> <i>offset</i> <i>amount</i></dt>
-<dd><p>Read as a bytearray. When <b>inlineLobs</b> is enabled at the connection, <b>orafetch</b> returns raw data instead of handles.</p></dd>
+<dt id='oralob-subcmd-lob-handle'><b>oralob</b> <i>subcmd</i> <i>lob-handle</i> ?args?</dt>
+<dd>
+<p><b>oralob read</b> <i>lob-handle</i> <i>offset</i> <i>amount</i> &mdash; Read as a bytearray.</p>
+<p><b>oralob write</b> <i>lob-handle</i> <i>offset</i> <i>data</i> &mdash; Write data to the LOB.</p>
+<p><b>oralob trim</b> <i>lob-handle</i> <i>newsize</i> &mdash; Truncate the LOB.</p>
+<p><b>oralob size</b> <i>lob-handle</i> &mdash; Return the current size.</p>
+<p><b>oralob close</b> <i>lob-handle</i> &mdash; Release the LOB handle.</p>
+<p>When <b>inlineLobs</b> is enabled at the connection, <b>orafetch</b> returns raw data instead of LOB handles.
+LOB handles reference the shared connection gate for serialized I/O.</p>
+</dd>
 </dl>
 <h3 id='async'>Async</h3>
 <dl class='deflist'>
 <dt id='oraexecasync-stmt--commit'><b>oraexecasync</b> <i>stmt</i> ?<b>-commit</b>?</dt>
-<dd><p>Begin execution in a worker thread. The worker holds addRef() on the underlying dpi handles.</p></dd>
+<dd><p>Submit the statement for execution on a persistent worker thread pool. Failover policy fields are
+snapshotted at enqueue time to avoid data races. The worker holds addRef() on the underlying dpi handles
+and serializes through the shared connection gate.</p></dd>
 <dt id='orawaitasync-stmt--timeout-ms'><b>orawaitasync</b> <i>stmt</i> ?<b>-timeout ms</b>?</dt>
-<dd><p>Wait for completion or timeout. On completion, temp LOBs created by <b>orabind</b> are released.</p></dd>
+<dd><p>Wait for completion or timeout. Returns <b>0</b> on success, <b>-3123</b> on timeout, or the Oracle error code
+on execution failure. On completion, temp LOBs created by <b>orabind</b> are released. On timeout, the async
+entry is marked as orphaned; the worker self-cleans on completion.</p></dd>
+</dl>
+<h3 id='transactions'>Transaction Control</h3>
+<dl class='deflist'>
+<dt id='oracommit-logon-handle'><b>oracommit</b> <i>logon-handle</i></dt>
+<dd><p>Commit the current transaction.</p></dd>
+<dt id='orarollback-logon-handle'><b>orarollback</b> <i>logon-handle</i></dt>
+<dd><p>Roll back the current transaction.</p></dd>
+<dt id='orabreak-logon-handle'><b>orabreak</b> <i>logon-handle</i></dt>
+<dd><p>Cancel the currently executing call on this connection via the shared connection gate.</p></dd>
+</dl>
+<h3 id='diagnostics'>Diagnostics</h3>
+<dl class='deflist'>
+<dt id='oramsg-handle-field'><b>oramsg</b> <i>handle</i> <i>field</i></dt>
+<dd><p>Return per-handle diagnostic information. Fields: <b>rc</b>, <b>error</b>, <b>rows</b>,
+<b>peo</b> (parse error offset), <b>ocicode</b>, <b>sqltype</b>, <b>fn</b>, <b>action</b>,
+<b>sqlstate</b>, <b>recoverable</b>, <b>warning</b>, <b>offset</b>, <b>all</b>, <b>allx</b>.</p></dd>
 </dl>
 <h2 id='configuration'>CONFIGURATION</h2>
-<p>Use <b>oraconfig</b> on a <b>logon-handle</b> or a <b>statement-handle</b>.</p>
-<p></p>
+<p>Use <b>oraconfig</b> on a <b>logon-handle</b> or a <b>statement-handle</b>.
+With no name/value, returns all keys; with a name only, returns that value; with name/value pairs, sets them.</p>
+<h3 id='config-handle'><b id='oraconfig-handle'>oraconfig</b> <i>handle</i> ?<i>name</i> ?<i>value</i>??</h3>
 <p>Connection-level keys:</p>
-<p><b>stmtcachesize</b>, <b>fetcharraysize</b>, <b>prefetchrows</b>, <b>prefetchmemory</b>, <b>calltimeout</b> (ms),</p>
-<p><b>inlineLobs</b> (0/1), and failover policy: <b>foMaxAttempts</b>, <b>foBackoffMs</b>, <b>foBackoffFactor</b>,</p>
-<p><b>foErrorClasses</b>, <b>foDebounceMs</b>, <b>-failovercallback</b>.</p>
-<p></p>
+<p><b>stmtcachesize</b>, <b>fetcharraysize</b>, <b>prefetchrows</b>, <b>calltimeout</b> (ms),
+<b>inlineLobs</b> (0/1), and failover policy: <b>foMaxAttempts</b> (capped at 1000), <b>foBackoffMs</b>,
+<b>foBackoffFactor</b>, <b>foErrorClasses</b> (<code>network</code> and/or <code>connlost</code>),
+<b>foDebounceMs</b>, <b>failovercallback</b>.</p>
 <p>Statement-level keys:</p>
-<p><b>fetchrows</b>, <b>prefetchrows</b> (overrides connection defaults when the statement exists).</p>
-<p></p>
+<p><b>fetchrows</b>, <b>prefetchrows</b> (overrides connection default when set; 0 reverts to connection default).</p>
+<p>Configuration changes on connections are synced to the shared adoption record so all wrappers
+on the same physical session remain consistent.</p>
 <h2 id='examples'>EXAMPLES</h2>
-<p></p>
 <p>Basic select:</p>
 <pre><code>set L [oralogon &quot;scott/tiger@//dbhost/pdb&quot;]
 set S [oraopen $L]
@@ -232,24 +272,35 @@ while 1 {
 }
 oraclose $S
 oralogoff $L</code></pre>
-<p></p>
 <p>Array DML:</p>
 <pre><code>set S [oraopen $L]
 oraparse $S {insert into t(x,y) values(:x,:y)}
 orabindexec $S -commit -arraydml :x {1 2 3} :y {A B C}</code></pre>
-<p></p>
 <p>Async:</p>
 <pre><code>oraparse $S {begin dbms_lock.sleep(2); end;}
 oraexecasync $S
 # do other work...
 orawaitasync $S -timeout 3000</code></pre>
-<p></p>
+<p>Pooled connection with failover:</p>
+<pre><code>set L [oralogon "scott/tiger@//dbhost/pdb" -pool {2 10 2} \
+       -failovercallback myFailoverHandler]
+oraconfig $L foMaxAttempts 3 foBackoffMs 500 \
+             foBackoffFactor 2.0 foErrorClasses {network connlost}</code></pre>
+<p>Namespace import:</p>
+<pre><code>namespace import ::oratcl::*
+set L [oralogon "scott/tiger@//dbhost/pdb"]</code></pre>
 <h2 id='environment'>ENVIRONMENT</h2>
 <p>The test suite uses <b>ORATCL_CONNECT</b> for the connect string.</p>
-<p></p>
 <h2 id='threads--multiple-interpreters'>THREADS &amp; MULTIPLE INTERPRETERS</h2>
-<p>One global ODPI context is created lazily and destroyed on process exit.</p>
-<p>Each interpreter has isolated handle registries. When statically linked into <b>tclsh</b>,
-every interp calls <b>oratcl_Init</b>; the driver ensures client libraries are loaded only once.</p>
+<p>One global ODPI context is created lazily and destroyed on process exit (two-phase teardown).
+Each interpreter has isolated handle registries.</p>
+<p>Connections can be adopted across interpreters: the adopter gets its own wrapper backed by the same
+physical <code>dpiConn*</code>, serialized through a shared per-connection operation gate. Behavioral
+configuration (autocommit, fetch sizes, failover policy) is synced to a shared record so adopters
+inherit consistent settings.</p>
+<p>Async execution uses a persistent thread pool. Workers hold addRef'd dpi handles and operate only
+through the shared gate. Teardown uses interp-scoped cancellation with finite timeouts and an
+orphan mechanism for workers that do not complete in time.</p>
+<p><b>oratcl_SafeInit</b> rejects loading into safe interpreters with a descriptive error.</p>
 <a class='back-to-top' href='#top' title='Back to top'>↑ Top</a>
 </div></body></html>

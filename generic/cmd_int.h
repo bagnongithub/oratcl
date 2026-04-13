@@ -115,7 +115,7 @@ int                Oradpi_CaptureODPIError(dpiErrorInfo *ei);
 #define ORATCL_NAMESPACE "::oratcl"
 
 /* Keep in sync with AC_INIT version in configure.ac */
-#define ORATCL_VERSION "9.0"
+#define ORATCL_VERSION "9.1"
 #define ORATCL_TCL_MIN "9"
 
 #define ORADPI_FO_CLASS_NETWORK 0x01u

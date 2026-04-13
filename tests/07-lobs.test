@@ -160,13 +160,13 @@ test 07-2.0 {inline LOBs arrive as data} -constraints {have_connect} -body {
 # ---- oralob subcommand errors ----
 
 test 07-3.0 {oralob invalid subcommand} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     catch {oralob bogus x} msg
     string match "*bad*" $msg
 } -result 1
 
 test 07-3.1 {oralob size on invalid handle} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     catch {oralob size bogus_handle} msg
     string match "*invalid*" $msg
 } -result 1
@@ -174,7 +174,7 @@ test 07-3.1 {oralob size on invalid handle} -body {
 # ---- LOBs cleaned up on oralogoff (MAJOR #1 fix) ----
 
 test 07-4.0 {oralogoff cleans up open LOB handles} -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr]]
     oraautocommit $L 0
     set T [::OratclTest::mk_table $L "(id NUMBER, c CLOB)" oratcl9_lob2]

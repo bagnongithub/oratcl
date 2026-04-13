@@ -6,13 +6,13 @@ source [file join [file dirname [info script]] 00-setup.test]
 
 test 51-1.0 {child oralogoff does not cancel parent async} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr]]
     set S [oraopen $L]
     oraparse $S "SELECT 1 FROM DUAL"
     oraexecasync $S
     set child [interp create]
-    interp eval $child {package require oratcl 9.0}
+    interp eval $child {package require oratcl 9.1}
     interp eval $child [list set L $L]
     interp eval $child {
         set S2 [oraopen $L]; oraclose $S2; oralogoff $L
@@ -26,13 +26,13 @@ test 51-1.0 {child oralogoff does not cancel parent async} \
 
 test 51-1.1 {child interp deletion does not cancel parent async} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr]]
     set S [oraopen $L]
     oraparse $S "SELECT 1 FROM DUAL"
     oraexecasync $S
     set child [interp create]
-    interp eval $child {package require oratcl 9.0}
+    interp eval $child {package require oratcl 9.1}
     interp eval $child [list set L $L]
     interp eval $child {set S2 [oraopen $L]; oraclose $S2}
     interp delete $child
@@ -44,13 +44,13 @@ test 51-1.1 {child interp deletion does not cancel parent async} \
 
 test 51-1.2 {each interp's async is independent on shared conn} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr]]
     set S1 [oraopen $L]
     oraparse $S1 "SELECT 1 FROM DUAL"
     oraexecasync $S1
     set child [interp create]
-    interp eval $child {package require oratcl 9.0}
+    interp eval $child {package require oratcl 9.1}
     interp eval $child [list set L $L]
     set childResult [interp eval $child {
         set S2 [oraopen $L]
@@ -82,7 +82,7 @@ test 51-2.0 {oraclose cancels own async in same interp} \
 
 test 51-3.0 {stress: 20 child adopt/logoff cycles during parent async} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr]]
     set ok 1
     for {set iter 0} {$iter < 5} {incr iter} {
@@ -91,7 +91,7 @@ test 51-3.0 {stress: 20 child adopt/logoff cycles during parent async} \
         oraexecasync $S
         for {set c 0} {$c < 4} {incr c} {
             set child [interp create]
-            interp eval $child {package require oratcl 9.0}
+            interp eval $child {package require oratcl 9.1}
             interp eval $child [list set L $L]
             interp eval $child {
                 set S2 [oraopen $L]; oraclose $S2; oralogoff $L
@@ -111,7 +111,7 @@ test 51-3.1 {stress: sequential child interps each with own async} \
     set results {}
     for {set i 0} {$i < 5} {incr i} {
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set ::cs [::OratclTest::connstr]]
         lappend results [interp eval $child {
             set L2 [oralogon $::cs]

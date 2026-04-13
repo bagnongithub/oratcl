@@ -43,7 +43,7 @@ test 50-1.1 {orafetch -command closes stmt after several rows} \
 
 test 50-1.2 {orafetch -command {oralogoff} does not crash} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set ::_testL [oralogon [::OratclTest::connstr]]
     set T [::OratclTest::mk_table $::_testL "(id NUMBER, val VARCHAR2(20))"]
     ::OratclTest::insert_rows $::_testL $T 3

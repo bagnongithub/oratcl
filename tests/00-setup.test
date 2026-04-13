@@ -44,7 +44,7 @@ namespace eval ::OratclTest {
         if {$cs eq ""} {
             return -code SKIP "ORATCL_CONNECT not set"
         }
-        package require oratcl 9.0
+        package require oratcl 9.1
         set L [oralogon $cs]
         set rc [catch {uplevel 1 $body} res opts]
         # Best effort cleanup of any tracked tables
@@ -146,7 +146,7 @@ namespace eval ::OratclTest {
 
 # Smoke: can we load the package at all?
 test 00-0.1 {package loads} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
 } -result 9.0
 
 # If no connect string, skip the rest of DB-dependent files (they still load).

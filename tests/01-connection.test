@@ -13,7 +13,7 @@ test 01-1.0 {oralogon/oralogoff roundtrip} -constraints {have_connect} -body {
 } -result 1
 
 test 01-1.1 {double oralogoff is safe} -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr]]
     oralogoff $L
     set rc [catch {oralogoff $L} msg]
@@ -21,7 +21,7 @@ test 01-1.1 {double oralogoff is safe} -constraints {have_connect} -body {
 } -result {1 1}
 
 test 01-1.2 {oralogoff with open statements succeeds} -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr]]
     set S1 [oraopen $L]
     set S2 [oraopen $L]
@@ -37,7 +37,7 @@ test 01-1.2 {oralogoff with open statements succeeds} -constraints {have_connect
 
 test 01-2.0 {oralogon with session pool} -constraints {have_connect} -body {
     set cs [::OratclTest::connstr]
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon $cs -pool 1 2 1 -homogeneous 1 -getmode wait]
     set S [oraopen $L]
     oraparse $S {select 1 from dual}
@@ -79,51 +79,51 @@ test 01-4.0 {oraautocommit returns current value} -constraints {have_connect} -b
 # ---- Error handling ----
 
 test 01-5.0 {invalid handle errors are clear} -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     catch {oraopen xyz} msg
     string match "*invalid*logon*handle*" $msg
 } -result 1
 
 test 01-5.1 {invalid connect string rejected} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set rc [catch {oralogon ""} msg]
     expr {$rc == 1}
 } -result 1
 
 test 01-5.2 {oralogon with malformed quoted password rejected} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set rc [catch {oralogon {user/"no_close_quote@db}} msg]
     list $rc [string match "*malformed*" $msg]
 } -result {1 1}
 
 test 01-5.3 {oralogon with valid quoted password syntax parses} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     # Should fail at connect level, not parse level
     set rc [catch {oralogon {testuser/"p@ss/word"@nonexistent_db_12345}} msg]
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
 
 test 01-5.4 {external auth with db parses (fails at connect, not parse)} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set rc [catch {oralogon {/@nonexistent_db_12345}} msg]
     # Parser should accept; connect will fail
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
 
 test 01-5.5 {plain user/password@db parses (fails at connect, not parse)} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set rc [catch {oralogon {testuser/testpass@nonexistent_db_12345}} msg]
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
 
 test 01-5.6 {empty password user/@db parses (fails at connect, not parse)} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set rc [catch {oralogon {testuser/@nonexistent_db_12345}} msg]
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
 
 test 01-5.7 {quoted password with slash parses (fails at connect, not parse)} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set rc [catch {oralogon {testuser/"pass/word"@nonexistent_db_12345}} msg]
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
@@ -136,7 +136,7 @@ test 01-5.7 {quoted password with slash parses (fails at connect, not parse)} -b
 # without corrupting the credential or crashing under concurrent load.
 
 test 01-5.8 {escaped double-quote inside quoted password parses} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     # Password contains a literal " character, escaped as \"
     # Raw Tcl string: testuser/"p\"ass"@nonexistent_db
     set rc [catch {oralogon "testuser/\"p\\\"ass\"@nonexistent_db_12345"} msg]
@@ -144,7 +144,7 @@ test 01-5.8 {escaped double-quote inside quoted password parses} -body {
 } -result {1 1}
 
 test 01-5.9 {escaped backslash inside quoted password parses} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     # Password contains a literal \ character, escaped as \\
     # Raw Tcl string: testuser/"p\\ass"@nonexistent_db
     set rc [catch {oralogon "testuser/\"p\\\\ass\"@nonexistent_db_12345"} msg]
@@ -152,14 +152,14 @@ test 01-5.9 {escaped backslash inside quoted password parses} -body {
 } -result {1 1}
 
 test 01-5.10 {both escape sequences in one quoted password parse} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     # Password: p\"a\\ss  (contains both an escaped quote and escaped backslash)
     set rc [catch {oralogon "testuser/\"p\\\"a\\\\ss\"@nonexistent_db_12345"} msg]
     list [expr {$rc == 1}] [expr {![string match "*malformed*" $msg]}]
 } -result {1 1}
 
 test 01-5.11 {quoted password missing closing quote still rejected} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     # The escaped-quote unescape must not consume the mandatory closing quote
     set rc [catch {oralogon {testuser/"no_close_quote_escape\"@db}} msg]
     list $rc [string match "*malformed*" $msg]
@@ -168,13 +168,13 @@ test 01-5.11 {quoted password missing closing quote still rejected} -body {
 # ---- Wrong argument counts ----
 
 test 01-6.0 {oralogon no args} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     catch {oralogon} msg
     expr {$msg ne ""}
 } -result 1
 
 test 01-6.1 {oralogoff no args} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     catch {oralogoff} msg
     expr {$msg ne ""}
 } -result 1

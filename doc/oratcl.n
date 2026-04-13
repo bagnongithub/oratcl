@@ -1,6 +1,6 @@
-.TH ORATCL 3 "September 2025" "Oratcl 9.0 (ODPI-C 5.6.2)" "Tcl Extension"
+.TH ORATCL 3 "April 2026" "Oratcl 9.1 (ODPI-C 5.6.4)" "Tcl Extension"
 .SH NAME
-Oratcl \- Tcl 9 interface to Oracle via ODPI-C 5.6.2
+Oratcl \- Tcl 9 interface to Oracle via ODPI-C 5.6.4
 
 .SH SYNOPSIS
 .nf
@@ -32,6 +32,8 @@ orafetch statement-handle
 oracols statement-handle
 oradesc logon-handle object-name
 
+oraconfig handle ?name ?value??
+
 oramsg  handle rc|error|rows|peo|ocicode|sqltype|fn|action|sqlstate|recoverable|warning|offset|all|allx
 
 oralob  size|read|write|trim|close lob-handle ?args...?
@@ -47,16 +49,23 @@ orawaitasync  statement-handle ?-timeout milliseconds?
 
 .SH DESCRIPTION
 .PP
-Oratcl 9.0 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
+Oratcl 9.1 implements the classic Oratcl API on top of ODPI-C (no OCI). It targets Tcl 9:
 command signatures use \fBTcl_Size\fR and are thread/multi-interp safe. One ODPI context is created per
-process; per-interp state (handles, registries) is created on each load. Async execution uses per-statement
-workers with proper addRef/release of underlying dpi handles.
+process; per-interp state (handles, registries) is created on each load.
+.PP
+Async execution uses a persistent thread pool with reference-counted entries and a shared
+work queue. All operations on a physical Oracle connection are serialized through a shared
+per-connection gate, ensuring safe concurrent use across interpreter threads and async workers.
+.PP
+All commands are registered both at global scope (backward compatibility) and under the
+\fB::oratcl\fR namespace. Use \fBnamespace import ::oratcl::*\fR to access the namespaced forms.
 
 .SH COMMANDS
 .SS Connection
 .TP
 \fBoralogon\fR \fIconnect-string\fR ?options?
 Connect using either username/password@connect_identifier, or external auth (leave user/pw empty).
+Quoted passwords with backslash escapes are supported: \fBuser/"pass\\"word"@db\fR.
 Options:
 .RS
 .IP "\fB-pool\fR \fImin max incr\fR" 4
@@ -67,20 +76,23 @@ Homogeneous pool (default 1).
 Pool get mode.
 .IP "\fB-failovercallback\fR \fIproc\fR" 4
 Register a Tcl proc invoked on recoverable errors (driver-side failover).
+Can also be set later via \fBoraconfig\fR.
 .RE
 Returns a logon-handle (e.g. "oraL1").
 
 .TP
 \fBoralogoff\fR \fIlogon-handle\fR
-Close the connection (see \fBORA_MSG\fR behavior for error reporting).
+Close the connection. Cancels pending async operations, releases associated LOBs and
+statements in phased order.
 
 .TP
 \fBoraautocommit\fR \fIlogon-handle\fR 0|1
 Set autocommit. DML/PLSQL commit on success when enabled or when \fB-commit\fR is supplied to exec commands.
+The change is propagated to the shared adoption record.
 
 .TP
 \fBorainfo\fR \fIlogon-handle\fR
-Return a dict with the current connection info. \fBCurrently\fR it returns \fBautocommit\fR only.
+Return a dict with the current connection info. Currently returns \fBautocommit\fR only.
 
 .SS Statements & execution
 .TP
@@ -91,27 +103,30 @@ Open a statement handle.
 Parse and, unless \fB-parseonly\fR, execute once. Clears the per-statement stored-bind cache if text changes.
 .TP
 \fBoraexec\fR \fIstmt\fR ?\fB-commit\fR?
-Execute the already-parsed statement (single execution).
+Execute the already-parsed statement. Supports driver-side failover with configurable retry/backoff.
 .TP
 \fBoraplexec\fR \fIstmt\fR \fI{pl/sql}\fR ?\fB-commit\fR?
 Prepare and execute a PL/SQL block.
 .TP
 \fBorabind\fR \fIstmt\fR \fI:name value\fR ...
-Bind scalars by name. LOB type is inferred by name and/or value representation.
+Bind scalars by name. LOB type is inferred by name suffix (\fB_blob\fR, \fB_clob\fR) and/or value representation.
 .TP
 \fBorabindexec\fR \fIstmt\fR ?\fB-commit\fR? ?\fB-arraydml\fR? \fI:name list\fR ...
-Array DML with name→list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().
+Array DML with name\(->list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().
 
 .SS Fetching
 .TP
 \fBorafetch\fR \fIstmt\fR ?options?
 Fetches up to \fB-max N\fR rows and returns \fB0\fR while data remains, or \fB1403\fR at end-of-data.
 Use \fB-returnrows\fR or \fB-resultvariable\fR to obtain a list of rows; \fB-asdict\fR returns dicts keyed by column names.
+.PP
+Fetched data is deep-copied into local snapshots so that \fB-command\fR callbacks can safely issue other
+database operations (including closing the statement) without deadlock.
 
 .SS Metadata
 .TP
 \fBoracols\fR \fIstmt\fR
-Return column names of the current query.
+Return column names of the current query. Names are uppercased with Unicode-aware conversion.
 .TP
 \fBoradesc\fR \fIlogon-handle\fR \fIobject-name\fR
 Return \fB{name type}\fR pairs for the columns of the given table or view.
@@ -120,25 +135,95 @@ Return \fB{name type}\fR pairs for the columns of the given table or view.
 .TP
 \fBoralob read\fR \fIlob-handle\fR \fIoffset\fR \fIamount\fR
 Read as a bytearray. When \fBinlineLobs\fR is enabled at the connection, \fBorafetch\fR returns raw data instead of handles.
+.TP
+\fBoralob write\fR \fIlob-handle\fR \fIoffset\fR \fIdata\fR
+Write data to the LOB starting at offset.
+.TP
+\fBoralob trim\fR \fIlob-handle\fR \fInewsize\fR
+Truncate the LOB to newsize bytes/characters.
+.TP
+\fBoralob size\fR \fIlob-handle\fR
+Return the current size of the LOB.
+.TP
+\fBoralob close\fR \fIlob-handle\fR
+Release the LOB handle.
 
 .SS Async
 .TP
 \fBoraexecasync\fR \fIstmt\fR ?\fB-commit\fR?
-Begin execution in a worker thread. The worker holds addRef() on the underlying dpi handles.
+Submit the statement for execution on a persistent worker thread pool. Failover policy fields
+are snapshotted at enqueue time to avoid data races. The worker holds addRef() on the
+underlying dpi handles and serializes through the shared connection gate.
 .TP
 \fBorawaitasync\fR \fIstmt\fR ?\fB-timeout ms\fR?
-Wait for completion or timeout. On completion, temp LOBs created by \fBorabind\fR are released.
+Wait for completion or timeout. Returns \fB0\fR on success, \fB-3123\fR on timeout, or the
+Oracle error code on execution failure. On completion, temp LOBs created by \fBorabind\fR are released.
+On timeout, the async entry is marked as orphaned; the worker self-cleans on completion.
+
+.SS Transaction Control
+.TP
+\fBoracommit\fR \fIlogon-handle\fR
+Commit the current transaction.
+.TP
+\fBorarollback\fR \fIlogon-handle\fR
+Roll back the current transaction.
+.TP
+\fBorabreak\fR \fIlogon-handle\fR
+Cancel the currently executing call on this connection via the shared connection gate.
+
+.SS Diagnostics
+.TP
+\fBoramsg\fR \fIhandle\fR \fIfield\fR
+Return per-handle diagnostic information. Fields: \fBrc\fR, \fBerror\fR, \fBrows\fR,
+\fBpeo\fR (parse error offset), \fBocicode\fR, \fBsqltype\fR, \fBfn\fR, \fBaction\fR,
+\fBsqlstate\fR, \fBrecoverable\fR, \fBwarning\fR, \fBoffset\fR, \fBall\fR, \fBallx\fR.
 
 .SH CONFIGURATION
 Use \fBoraconfig\fR on a \fBlogon-handle\fR or a \fBstatement-handle\fR.
+With no name/value, returns all keys; with a name only, returns that value; with name/value pairs, sets them.
 
-Connection-level keys:
-\fBstmtcachesize\fR, \fBfetcharraysize\fR, \fBprefetchrows\fR, \fBprefetchmemory\fR, \fBcalltimeout\fR (ms),
-\fBinlineLobs\fR (0/1), and failover policy: \fBfoMaxAttempts\fR, \fBfoBackoffMs\fR, \fBfoBackoffFactor\fR,
-\fBfoErrorClasses\fR, \fBfoDebounceMs\fR, \fB-failovercallback\fR.
+.SS Connection-level keys
+.TP
+\fBstmtcachesize\fR
+Statement cache size (applied to the Oracle connection).
+.TP
+\fBfetcharraysize\fR
+Number of rows fetched per round-trip (default 100).
+.TP
+\fBprefetchrows\fR
+ODPI-C prefetch row count. Connection-level default for all statements.
+.TP
+\fBcalltimeout\fR
+OCI call timeout in milliseconds.
+.TP
+\fBinlineLobs\fR
+Boolean. When true, \fBorafetch\fR materializes LOB data inline instead of returning LOB handles.
+.TP
+\fBfoMaxAttempts\fR
+Maximum retry attempts for driver-side failover (capped at 1000).
+.TP
+\fBfoBackoffMs\fR
+Initial backoff in milliseconds between retries.
+.TP
+\fBfoBackoffFactor\fR
+Exponential multiplier for each successive backoff interval.
+.TP
+\fBfoErrorClasses\fR
+List of error classes that trigger retries: \fBnetwork\fR and/or \fBconnlost\fR.
+.TP
+\fBfoDebounceMs\fR
+Debounce window in milliseconds for coalescing failover callbacks.
+.TP
+\fBfailovercallback\fR
+Tcl command prefix invoked on recoverable errors. Set to empty string to clear.
 
-Statement-level keys:
-\fBfetchrows\fR, \fBprefetchrows\fR (overrides connection defaults when the statement exists).
+.SS Statement-level keys
+.TP
+\fBfetchrows\fR
+Override fetch array size for this statement.
+.TP
+\fBprefetchrows\fR
+Override prefetch rows for this statement. When unset (0), inherits the connection default.
 
 .SH EXAMPLES
 .PP
@@ -174,10 +259,34 @@ oraexecasync $S
 orawaitasync $S -timeout 3000
 .fi
 
+Pooled connection with failover:
+.nf
+set L [oralogon "scott/tiger@//dbhost/pdb" -pool {2 10 2} \\
+       -failovercallback myFailoverHandler]
+oraconfig $L foMaxAttempts 3 foBackoffMs 500 \\
+             foBackoffFactor 2.0 foErrorClasses {network connlost}
+.fi
+
+Namespace import:
+.nf
+namespace import ::oratcl::*
+set L [oralogon "scott/tiger@//dbhost/pdb"]
+.fi
+
 .SH ENVIRONMENT
 The test suite uses \fBORATCL_CONNECT\fR for the connect string.
 
 .SH THREADS & MULTIPLE INTERPRETERS
-One global ODPI context is created lazily and destroyed on process exit.
-Each interpreter has isolated handle registries. When statically linked into \fBtclsh\fR,
-every interp calls \fBoratcl_Init\fR; the driver ensures client libraries are loaded only once.
+One global ODPI context is created lazily and destroyed on process exit (two-phase teardown).
+Each interpreter has isolated handle registries.
+.PP
+Connections can be adopted across interpreters: the adopter gets its own wrapper backed by the same
+physical dpiConn*, serialized through a shared per-connection operation gate. Behavioral
+configuration (autocommit, fetch sizes, failover policy) is synced to a shared record so adopters
+inherit consistent settings.
+.PP
+Async execution uses a persistent thread pool. Workers hold addRef'd dpi handles and operate only
+through the shared gate. Teardown uses interp-scoped cancellation with finite timeouts and an
+orphan mechanism for workers that do not complete in time.
+.PP
+\fBoratcl_SafeInit\fR rejects loading into safe interpreters.

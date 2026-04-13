@@ -6,7 +6,7 @@ source [file join [file dirname [info script]] 00-setup.test]
 
 test 52-1.0 {pooled connection basic lifecycle} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr] -pool 1 3 1]
     set S [oraopen $L]
     oraparse $S "SELECT 1 FROM DUAL"
@@ -20,10 +20,10 @@ test 52-1.0 {pooled connection basic lifecycle} \
 
 test 52-1.1 {adopter survives owner logoff on pooled connection} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr] -pool 1 3 1]
     set child [interp create]
-    interp eval $child {package require oratcl 9.0}
+    interp eval $child {package require oratcl 9.1}
     interp eval $child [list set L $L]
     interp eval $child {set S [oraopen $L]; oraclose $S}
     oralogoff $L
@@ -42,12 +42,12 @@ test 52-1.1 {adopter survives owner logoff on pooled connection} \
 
 test 52-1.2 {multiple adopters survive owner logoff on pooled connection} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr] -pool 1 3 1]
     set children {}
     for {set i 0} {$i < 3} {incr i} {
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set L $L]
         interp eval $child {set S [oraopen $L]; oraclose $S}
         lappend children $child
@@ -71,10 +71,10 @@ test 52-1.2 {multiple adopters survive owner logoff on pooled connection} \
 
 test 52-2.0 {last adopter logoff closes pool cleanly} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set L [oralogon [::OratclTest::connstr] -pool 1 2 1]
     set child [interp create]
-    interp eval $child {package require oratcl 9.0}
+    interp eval $child {package require oratcl 9.1}
     interp eval $child [list set L $L]
     interp eval $child {set S [oraopen $L]; oraclose $S}
     oralogoff $L
@@ -85,13 +85,13 @@ test 52-2.0 {last adopter logoff closes pool cleanly} \
 
 test 52-3.0 {stress: 10 adopt/logoff cycles on pooled connection} \
     -constraints {have_connect} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     set cs [::OratclTest::connstr]
     set ok 1
     for {set iter 0} {$iter < 10} {incr iter} {
         set L [oralogon $cs -pool 1 2 1]
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set L $L]
         interp eval $child {
             set S [oraopen $L]

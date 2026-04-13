@@ -10,7 +10,7 @@ test 53-1.0 {configure failover callback on adopted handle does not error} \
     -constraints {have_connect} -body {
     ::OratclTest::with_connection L {
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set L $L]
         set rc [interp eval $child {
             set S [oraopen $L]; oraclose $S
@@ -29,7 +29,7 @@ test 53-1.1 {failover callback readable after set on adopted handle} \
     -constraints {have_connect} -body {
     ::OratclTest::with_connection L {
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set L $L]
         set hasCallback [interp eval $child {
             set S [oraopen $L]; oraclose $S
@@ -51,7 +51,7 @@ test 53-2.0 {autocommit change visible to new adopter} \
         oraautocommit $L 0
         oraautocommit $L 1
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set L $L]
         set adopted_ac [interp eval $child {
             set S [oraopen $L]; oraclose $S
@@ -69,7 +69,7 @@ test 53-2.1 {autocommit toggle propagates correctly} \
         for {set v 0} {$v <= 1} {incr v} {
             oraautocommit $L $v
             set child [interp create]
-            interp eval $child {package require oratcl 9.0}
+            interp eval $child {package require oratcl 9.1}
             interp eval $child [list set L $L]
             lappend results [interp eval $child {
                 set S [oraopen $L]; oraclose $S
@@ -88,7 +88,7 @@ test 53-2.2 {multiple adopters see consistent autocommit} \
         set results {}
         for {set i 0} {$i < 5} {incr i} {
             set child [interp create]
-            interp eval $child {package require oratcl 9.0}
+            interp eval $child {package require oratcl 9.1}
             interp eval $child [list set L $L]
             lappend results [interp eval $child {
                 set S [oraopen $L]; oraclose $S
@@ -107,7 +107,7 @@ test 53-3.0 {fetchArraySize change visible to new adopter} \
     ::OratclTest::with_connection L {
         oraconfig $L fetcharraysize 500
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set L $L]
         set adopted_fas [interp eval $child {
             set S [oraopen $L]; oraclose $S
@@ -123,7 +123,7 @@ test 53-3.1 {inlineLobs change visible to new adopter} \
     ::OratclTest::with_connection L {
         oraconfig $L inlineLobs 1
         set child [interp create]
-        interp eval $child {package require oratcl 9.0}
+        interp eval $child {package require oratcl 9.1}
         interp eval $child [list set L $L]
         set adopted_il [interp eval $child {
             set S [oraopen $L]; oraclose $S

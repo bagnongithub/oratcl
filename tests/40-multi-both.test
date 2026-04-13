@@ -16,7 +16,7 @@ test 40-1.0 {each thread creates child interp and uses oratcl} \
                 set _rc 1
                 try {
                     set i1 [interp create]
-                    interp eval $i1 {package require oratcl 9.0}
+                    interp eval $i1 {package require oratcl 9.1}
                     interp eval $i1 [list set ::env(ORATCL_CONNECT) $::env(ORATCL_CONNECT)]
                     interp eval $i1 {
                         set L [oralogon $::env(ORATCL_CONNECT)]
@@ -53,7 +53,7 @@ test 40-1.1 {adopted connection shares gate across threads} \
         set gateReply {}
         thread::send -async $tid {
             set rc [catch {
-                package require oratcl 9.0
+                package require oratcl 9.1
                 ::oratcl::internal::connGateId $::L
             } msg opts]
             list $rc $msg
@@ -80,7 +80,7 @@ test 40-1.2 {adopted connection usable from worker thread} \
         set result {}
         thread::send -async $tid {
             set rc [catch {
-                package require oratcl 9.0
+                package require oratcl 9.1
                 set S [oraopen $::L]
                 oraparse $S {select 42 from dual}
                 oraexec $S

@@ -51,7 +51,7 @@ test 08-2.0 {orabreak is callable and returns 0} -constraints {have_connect} -bo
 } -result 0
 
 test 08-2.1 {orabreak on invalid handle errors} -body {
-    package require oratcl 9.0
+    package require oratcl 9.1
     catch {orabreak bogus_handle} msg
     string match "*invalid*" $msg
 } -result 1

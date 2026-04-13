@@ -14,7 +14,7 @@ test 30-1.0 {parallel queries in worker threads} -constraints {have_connect have
             thread::send $tid {
                 set _rc 1
                 try {
-                    package require oratcl 9.0
+                    package require oratcl 9.1
                     set L [oralogon $::env(ORATCL_CONNECT)]
                     set S [oraopen $L]
                     oraparse $S {select 1 from dual}
@@ -52,7 +52,7 @@ test 30-1.1 {parallel DML in worker threads} -constraints {have_connect have_thr
                 thread::send $tid {
                     set _rc 1
                     try {
-                        package require oratcl 9.0
+                        package require oratcl 9.1
                         set L [oralogon $::env(ORATCL_CONNECT)]
                         set S [oraopen $L]
                         oraparse $S "INSERT INTO $::T VALUES (:id, :tid)"
@@ -89,7 +89,7 @@ test 30-1.2 {parallel async exec in worker threads} -constraints {have_connect h
             thread::send $tid {
                 set _rc 1
                 try {
-                    package require oratcl 9.0
+                    package require oratcl 9.1
                     set L [oralogon $::env(ORATCL_CONNECT)]
                     set S [oraopen $L]
                     oraparse $S {select 1 from dual}
