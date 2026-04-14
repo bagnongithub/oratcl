@@ -1,4 +1,4 @@
-# all.tcl — Oratcl 9.0 ODPI conformance tests (Tcl 9 / tcltest 2.5)
+# all.tcl — Oratcl 9.1 ODPI conformance tests (Tcl 9 / tcltest 2.5)
 if {"::tcltest" ni [namespace children]} {
     package require tcltest 2.5
     namespace import -force ::tcltest::*

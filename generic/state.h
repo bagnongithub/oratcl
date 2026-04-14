@@ -115,14 +115,32 @@ typedef struct OradpiConn {
 } OradpiConn;
 
 typedef struct OradpiStmt {
-    OradpiBase  base;
-    OradpiConn *owner;
-    dpiStmt    *stmt;
-    uint32_t    fetchArray;
-    uint32_t    prefetchRows; /* per-statement override; 0 = use connection default */
+    OradpiBase        base;
+    OradpiConn       *owner;
+    dpiStmt          *stmt;
+    uint32_t          fetchArray;
+    uint32_t          prefetchRows; /* per-statement override; 0 = use connection default */
 
-    uint32_t    numCols;
-    int         defined;
+    uint32_t          numCols;
+    int               defined;
+
+    /* Fetch metadata cache — populated on first orafetch, invalidated on
+     * re-parse.  Eliminates repeated dpiStmt_getQueryInfo round-trips,
+     * upper_copy allocations, and Tcl_ObjPrintf calls in tight fetch loops.
+     * Owned by cmd_fetch.c; lifecycle managed via Oradpi_FreeFetchCache. */
+    uint32_t          fetchCacheNumCols; /* 0 = cache invalid */
+    int              *fetchIsChar;       /* [fetchCacheNumCols] column char-type flags */
+    Tcl_Obj         **fetchColNames;     /* [fetchCacheNumCols] upper-cased, IncrRefCount'd */
+    Tcl_Obj         **fetchNumberKeys;   /* [fetchCacheNumCols] "0".."N-1", IncrRefCount'd */
+
+    /* Output variable cache — one pre-defined dpiVar per column.
+     * Eliminates N dpiStmt_getQueryValue calls per row (I2); enables
+     * dpiStmt_fetchRows batch drain without per-row ODPI overhead (I3).
+     * NULL when unavailable (e.g. object-type columns, or after var alloc
+     * failure) — fallback to dpiStmt_getQueryValue path is taken instead. */
+    dpiVar          **fetchVars;        /* [fetchCacheNumCols] addRef'd dpiVar handles */
+    dpiData         **fetchVarData;     /* [fetchCacheNumCols] var buffer pointer arrays */
+    dpiNativeTypeNum *fetchNativeTypes; /* [fetchCacheNumCols] native type per column */
 } OradpiStmt;
 
 typedef struct OradpiLob {

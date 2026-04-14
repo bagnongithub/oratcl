@@ -31,9 +31,13 @@ int             Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Ob
 static Tcl_Obj *upper_copy(const char *s, uint32_t n);
 
 typedef struct OradpiFetchColMeta {
-    char    *name;
-    uint32_t nameLen;
-    int      isChar;
+    char            *name;
+    uint32_t         nameLen;
+    int              isChar;
+    /* Type fields needed to create an explicit dpiVar per column (I2). */
+    dpiOracleTypeNum oracleTypeNum;
+    dpiNativeTypeNum defaultNativeTypeNum;
+    uint32_t         clientSizeInBytes;
 } OradpiFetchColMeta;
 
 typedef struct OradpiFetchCell {
@@ -126,8 +130,11 @@ static int SnapshotColumnMeta(Tcl_Interp *ip, OradpiStmt *st, uint32_t numCols, 
             CONN_GATE_LEAVE(st->owner);
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_getQueryInfo");
         }
-        meta[c - 1].isChar  = is_char_type(qi.typeInfo.oracleTypeNum);
-        meta[c - 1].nameLen = qi.nameLength;
+        meta[c - 1].isChar               = is_char_type(qi.typeInfo.oracleTypeNum);
+        meta[c - 1].oracleTypeNum        = qi.typeInfo.oracleTypeNum;
+        meta[c - 1].defaultNativeTypeNum = qi.typeInfo.defaultNativeTypeNum;
+        meta[c - 1].clientSizeInBytes    = qi.typeInfo.clientSizeInBytes;
+        meta[c - 1].nameLen              = qi.nameLength;
         if (qi.nameLength == 0)
             continue;
         if (Oradpi_CheckedAllocBytes(NULL, (Tcl_Size)qi.nameLength + 1, sizeof(char), &nameBytes, "column name copy") != TCL_OK) {
@@ -326,6 +333,46 @@ static Tcl_Obj *SnapshotCellToObj(Tcl_Interp *ip, GlobalConnRec *shared, OradpiF
     }
 }
 
+/* Invalidate and free the per-statement fetch metadata cache.
+ * Called on re-parse (oraparse / orasql / oraplexec) and at statement
+ * teardown (Oradpi_FreeStmt).  Safe to call on a statement with no cache. */
+void Oradpi_FreeFetchCache(OradpiStmt *s) {
+    if (!s || s->fetchCacheNumCols == 0)
+        return;
+    uint32_t n = s->fetchCacheNumCols;
+    if (s->fetchIsChar) {
+        Tcl_Free((char *)s->fetchIsChar);
+        s->fetchIsChar = NULL;
+    }
+    if (s->fetchColNames) {
+        for (uint32_t c = 0; c < n; c++)
+            if (s->fetchColNames[c])
+                Tcl_DecrRefCount(s->fetchColNames[c]);
+        Tcl_Free((char *)s->fetchColNames);
+        s->fetchColNames = NULL;
+    }
+    if (s->fetchNumberKeys) {
+        for (uint32_t c = 0; c < n; c++)
+            if (s->fetchNumberKeys[c])
+                Tcl_DecrRefCount(s->fetchNumberKeys[c]);
+        Tcl_Free((char *)s->fetchNumberKeys);
+        s->fetchNumberKeys = NULL;
+    }
+    /* Release pre-defined output variables (I2). */
+    if (s->fetchVars) {
+        for (uint32_t c = 0; c < n; c++)
+            if (s->fetchVars[c])
+                dpiVar_release(s->fetchVars[c]);
+        Tcl_Free((char *)s->fetchVars);
+        s->fetchVars = NULL;
+        Tcl_Free((char *)s->fetchVarData);
+        s->fetchVarData = NULL;
+        Tcl_Free((char *)s->fetchNativeTypes);
+        s->fetchNativeTypes = NULL;
+    }
+    s->fetchCacheNumCols = 0;
+}
+
 /*
  * orafetch statement-handle ?-datavariable varName? ?-dataarray arrName?
  *         ?-indexbyname? ?-indexbynumber? ?-command script? ?-max N?
@@ -469,12 +516,18 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     if (!returnRows && !cmd && !resultVar && maxRows == 0)
         maxRows = 1;
 
-    CONN_GATE_ENTER(st->owner);
-    if (dpiStmt_getNumQueryColumns(st->stmt, &numCols) != DPI_SUCCESS) {
+    /* I1: column count is already known after the first fetch — skip the
+     * ODPI call and gate acquire/release on every subsequent invocation. */
+    if (st->fetchCacheNumCols > 0) {
+        numCols = st->fetchCacheNumCols;
+    } else {
+        CONN_GATE_ENTER(st->owner);
+        if (dpiStmt_getNumQueryColumns(st->stmt, &numCols) != DPI_SUCCESS) {
+            CONN_GATE_LEAVE(st->owner);
+            return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_getNumQueryColumns");
+        }
         CONN_GATE_LEAVE(st->owner);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_getNumQueryColumns");
     }
-    CONN_GATE_LEAVE(st->owner);
 
     if (numCols == 0) {
         Tcl_SetObjResult(ip, returnRows ? Tcl_NewListObj(0, NULL) : Tcl_NewIntObj(1403));
@@ -484,13 +537,95 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     numColsSize = (Tcl_Size)numCols;
     needNames   = (asDict || (dataArray && indexByName));
 
-    if (Oradpi_CheckedAllocBytes(ip, numColsSize, sizeof(*meta), &metaBytes, "column metadata snapshot") != TCL_OK)
-        return TCL_ERROR;
-    meta = (OradpiFetchColMeta *)Tcl_Alloc(metaBytes);
-    memset(meta, 0, metaBytes);
-    if (SnapshotColumnMeta(ip, st, numCols, meta) != TCL_OK) {
-        code = TCL_ERROR;
-        goto cleanup;
+    /* Metadata cache check.  On the first orafetch after a parse the cache
+     * is empty (fetchCacheNumCols == 0); we snapshot column info from ODPI
+     * once and store it.  On every subsequent call we skip all ODPI
+     * round-trips, DString allocations (upper_copy), and Tcl_ObjPrintf
+     * calls and just IncrRefCount the already-built objects instead. */
+    if (st->fetchCacheNumCols != numCols) {
+        Oradpi_FreeFetchCache(st);
+
+        if (Oradpi_CheckedAllocBytes(ip, numColsSize, sizeof(*meta), &metaBytes, "column metadata snapshot") != TCL_OK) {
+            code = TCL_ERROR;
+            goto cleanup;
+        }
+        meta = (OradpiFetchColMeta *)Tcl_Alloc(metaBytes);
+        memset(meta, 0, metaBytes);
+        if (SnapshotColumnMeta(ip, st, numCols, meta) != TCL_OK) {
+            code = TCL_ERROR;
+            goto cleanup;
+        }
+
+        st->fetchIsChar     = (int *)Tcl_Alloc(numCols * sizeof(int));
+        st->fetchColNames   = (Tcl_Obj **)Tcl_Alloc(numCols * sizeof(Tcl_Obj *));
+        st->fetchNumberKeys = (Tcl_Obj **)Tcl_Alloc(numCols * sizeof(Tcl_Obj *));
+        memset(st->fetchColNames, 0, numCols * sizeof(Tcl_Obj *));
+        memset(st->fetchNumberKeys, 0, numCols * sizeof(Tcl_Obj *));
+
+        for (uint32_t c = 0; c < numCols; c++) {
+            st->fetchIsChar[c]   = meta[c].isChar;
+            st->fetchColNames[c] = meta[c].nameLen ? upper_copy(meta[c].name, meta[c].nameLen) : Tcl_NewStringObj("", 0);
+            Tcl_IncrRefCount(st->fetchColNames[c]);
+            st->fetchNumberKeys[c] = Tcl_ObjPrintf("%u", c);
+            Tcl_IncrRefCount(st->fetchNumberKeys[c]);
+        }
+        st->fetchCacheNumCols = numCols;
+
+        /* I2: Build per-column output variable cache to eliminate N
+         * dpiStmt_getQueryValue calls per row.  Done before FreeFetchMeta so
+         * meta[c] type fields are still valid.  Object columns need a
+         * dpiObjectType* unavailable here; any failure falls back to
+         * dpiStmt_getQueryValue for the entire statement. */
+        st->fetchVars         = (dpiVar **)Tcl_Alloc(numCols * sizeof(dpiVar *));
+        st->fetchVarData      = (dpiData **)Tcl_Alloc(numCols * sizeof(dpiData *));
+        st->fetchNativeTypes  = (dpiNativeTypeNum *)Tcl_Alloc(numCols * sizeof(dpiNativeTypeNum));
+        memset(st->fetchVars, 0, numCols * sizeof(dpiVar *));
+        memset(st->fetchVarData, 0, numCols * sizeof(dpiData *));
+
+        int varBuildOk = 1;
+        CONN_GATE_ENTER(st->owner);
+        for (uint32_t c = 0; c < numCols; c++) {
+            dpiVar  *var  = NULL;
+            dpiData *data = NULL;
+            if (meta[c].oracleTypeNum == DPI_ORACLE_TYPE_OBJECT) {
+                varBuildOk = 0;
+                break;
+            }
+            /* clientSizeInBytes is measured in bytes; pass sizeIsBytes=1 for
+             * variable-length char/raw types.  For fixed-size types (NUMBER,
+             * DATE, LOB, etc.) size is ignored by ODPI-C so both 0 and 1 are
+             * safe — use 0 to be explicit. */
+            int sizeIsBytes = (meta[c].clientSizeInBytes > 0) ? 1 : 0;
+            if (dpiConn_newVar(st->owner->conn, meta[c].oracleTypeNum, meta[c].defaultNativeTypeNum, st->fetchArray, meta[c].clientSizeInBytes, sizeIsBytes, 0, NULL, &var, &data) != DPI_SUCCESS) {
+                varBuildOk = 0;
+                break;
+            }
+            if (dpiStmt_define(st->stmt, c + 1, var) != DPI_SUCCESS) {
+                dpiVar_release(var);
+                varBuildOk = 0;
+                break;
+            }
+            st->fetchVars[c]        = var;
+            st->fetchVarData[c]     = data;
+            st->fetchNativeTypes[c] = meta[c].defaultNativeTypeNum;
+        }
+        CONN_GATE_LEAVE(st->owner);
+
+        if (!varBuildOk) {
+            for (uint32_t c = 0; c < numCols; c++)
+                if (st->fetchVars[c])
+                    dpiVar_release(st->fetchVars[c]);
+            Tcl_Free((char *)st->fetchVars);
+            st->fetchVars = NULL;
+            Tcl_Free((char *)st->fetchVarData);
+            st->fetchVarData = NULL;
+            Tcl_Free((char *)st->fetchNativeTypes);
+            st->fetchNativeTypes = NULL;
+        }
+
+        /* meta name copies served only to build the cache; free them now. */
+        FreeFetchMeta(meta, numColsSize);
+        meta = NULL;
     }
 
     if (needNames) {
@@ -499,9 +634,8 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
             goto cleanup;
         }
         colNames = (Tcl_Obj **)Tcl_Alloc(colNameBytes);
-        memset(colNames, 0, colNameBytes);
         for (uint32_t c = 0; c < numCols; c++) {
-            colNames[c] = meta[c].nameLen ? upper_copy(meta[c].name, meta[c].nameLen) : Tcl_NewStringObj("", 0);
+            colNames[c] = st->fetchColNames[c];
             Tcl_IncrRefCount(colNames[c]);
         }
     }
@@ -520,9 +654,8 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
             goto cleanup;
         }
         numberKeys = (Tcl_Obj **)Tcl_Alloc(keyBytes);
-        memset(numberKeys, 0, keyBytes);
         for (uint32_t c = 0; c < numCols; c++) {
-            numberKeys[c] = Tcl_ObjPrintf("%u", c);
+            numberKeys[c] = st->fetchNumberKeys[c];
             Tcl_IncrRefCount(numberKeys[c]);
         }
     }
@@ -565,157 +698,337 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
         Oradpi_SharedConnAddRef(fetchShared);
     Tcl_IncrRefCount(stmtNameSnap);
 
-    for (;;) {
-        int         hasRow         = 0;
-        uint32_t    bufferRowIndex = 0;
-        const char *snapshotWhere  = NULL;
-        const char *snapshotMsg    = NULL;
+    /* =========================================================================
+     * Fetch loop — two paths share the same reentrancy zone:
+     *
+     *   Fast path (I2+I3, when st->fetchVarData != NULL):
+     *     dpiStmt_fetchRows drains the ODPI buffer in one call per batch;
+     *     per-row values come from direct dpiData[] buffer access — zero
+     *     dpiStmt_getQueryValue ODPI calls in the hot inner loop.
+     *     The gate is acquired once per batch (not per row), reducing lock
+     *     contention against async workers or adopted-connection threads (I6).
+     *
+     *   Fallback (st->fetchVarData == NULL):
+     *     Original dpiStmt_fetch + dpiStmt_getQueryValue per row.
+     *     Used when var creation failed (e.g. object-type columns).
+     * ========================================================================= */
+    if (st->fetchVarData) {
+        /* ------------------------------------------------------------------
+         * FAST PATH (I2 + I3)
+         * ------------------------------------------------------------------ */
+        int               moreRows   = 1;
+        uint32_t          batchStart = 0, batchCount = 0, batchPos = 0;
+        /* Snapshot cache pointers before reentrancy so callbacks that change
+         * fetch settings (orastmt -fetchrows) cannot cause UAF — fetchDead
+         * is checked at the top of every iteration. */
+        dpiData         **varData     = st->fetchVarData;
+        dpiNativeTypeNum *nativeTypes = st->fetchNativeTypes;
 
-        /* On second+ iteration, a previous reentrancy may have
-         * destroyed the statement wrapper.  Check before touching st. */
-        if (fetchDead) {
-            Tcl_SetObjResult(ip, Tcl_NewStringObj("orafetch: statement closed during callback", -1));
-            code = TCL_ERROR;
-            goto cleanup;
-        }
-
-        memset(colVals, 0, colValBytes);
-        FreeFetchCells(cells, numColsSize, fetchShared);
-        memset(cells, 0, cellBytes);
-
-        Oradpi_SharedConnGateEnter(fetchShared);
-        if (dpiStmt_fetch(fetchStmt, &hasRow, &bufferRowIndex) != DPI_SUCCESS) {
-            Oradpi_SharedConnGateLeave(fetchShared);
-            code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_fetch");
-            goto cleanup;
-        }
-        (void)bufferRowIndex;
-        if (!hasRow) {
-            Oradpi_SharedConnGateLeave(fetchShared);
-            break;
-        }
-
-        for (uint32_t c = 1; c <= numCols; c++) {
-            dpiNativeTypeNum nt;
-            dpiData         *d = NULL;
-            if (dpiStmt_getQueryValue(fetchStmt, c, &nt, &d) != DPI_SUCCESS) {
-                Oradpi_SharedConnGateLeave(fetchShared);
-                code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_getQueryValue");
-                goto cleanup;
-            }
-            if (SnapshotCellLocked(fetchInlineLobs, nt, d, meta[c - 1].isChar, &cells[c - 1], &snapshotWhere, &snapshotMsg) != TCL_OK) {
-                Oradpi_SharedConnGateLeave(fetchShared);
-                if (snapshotWhere)
-                    code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, snapshotWhere);
-                else {
-                    Tcl_SetObjResult(ip, Tcl_NewStringObj(snapshotMsg ? snapshotMsg : "failed to snapshot fetched value", -1));
-                    code = TCL_ERROR;
-                }
-                goto cleanup;
-            }
-        }
-        Oradpi_SharedConnGateLeave(fetchShared);
-
-        for (uint32_t c = 0; c < numCols; c++) {
-            colVals[c] = SnapshotCellToObj(ip, fetchShared, &cells[c]);
-            if (!colVals[c]) {
+        for (;;) {
+            if (fetchDead) {
+                Tcl_SetObjResult(ip, Tcl_NewStringObj("orafetch: statement closed during callback", -1));
                 code = TCL_ERROR;
                 goto cleanup;
             }
-        }
 
-        rowObj = Tcl_NewListObj(0, NULL);
-        Tcl_IncrRefCount(rowObj);
-        for (uint32_t c = 0; c < numCols; c++) {
-            if (asDict) {
-                LAPPEND_GOTO(ip, rowObj, colNames[c], code, cleanup);
-                LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
-            } else {
-                LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
-            }
-        }
-
-        /* --- Reentrancy zone begins ---
-         * Tcl_ObjSetVar2 and Tcl_EvalObjEx can execute arbitrary Tcl,
-         * including oraclose/oralogoff.  After each call, verify that
-         * the statement wrapper is still alive. */
-
-        if (dataArray) {
-            if (indexByNumber) {
-                for (uint32_t c = 0; c < numCols; c++) {
-                    if (!Tcl_ObjSetVar2(ip, dataArray, numberKeys[c], colVals[c], TCL_LEAVE_ERR_MSG)) {
-                        code = TCL_ERROR;
-                        goto cleanup;
-                    }
-                }
-                /* Liveness check after variable-trace reentrancy */
-                if (!Oradpi_LookupStmt(ip, stmtNameSnap))
-                    fetchDead = 1;
-            } else if (indexByName) {
-                for (uint32_t c = 0; c < numCols; c++) {
-                    if (!Tcl_ObjSetVar2(ip, dataArray, colNames[c], colVals[c], TCL_LEAVE_ERR_MSG)) {
-                        code = TCL_ERROR;
-                        goto cleanup;
-                    }
-                }
-                /* Liveness check after variable-trace reentrancy */
-                if (!Oradpi_LookupStmt(ip, stmtNameSnap))
-                    fetchDead = 1;
-            }
-        }
-
-        if (!fetchDead && dataVar && !Tcl_ObjSetVar2(ip, dataVar, NULL, rowObj, TCL_LEAVE_ERR_MSG)) {
-            code = TCL_ERROR;
-            goto cleanup;
-        }
-        /* Liveness check after -datavariable trace */
-        if (!fetchDead && dataVar && !Oradpi_LookupStmt(ip, stmtNameSnap))
-            fetchDead = 1;
-
-        if (!fetchDead && cmd) {
-            int evalCode = Tcl_EvalObjEx(ip, cmd, TCL_EVAL_GLOBAL);
-
-            /* Liveness check after -command callback */
-            if (!Oradpi_LookupStmt(ip, stmtNameSnap))
-                fetchDead = 1;
-
-            if (evalCode == TCL_BREAK) {
-                /* TCL_BREAK: stop fetching, treat as normal completion */
-                Tcl_DecrRefCount(rowObj);
-                rowObj = NULL;
-                memset(colVals, 0, colValBytes);
-                fetched++;
-                break;
-            }
-            if (evalCode == TCL_CONTINUE) {
-                /* TCL_CONTINUE: skip to next row (don't append to rowsList) */
-                Tcl_DecrRefCount(rowObj);
-                rowObj = NULL;
-                memset(colVals, 0, colValBytes);
-                fetched++;
-                if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
+            /* Drain next batch when current one is exhausted (I3).
+             * Pass maxRows (when limited) rather than fetchArray so ODPI-C
+             * advances bufferRowIndex by at most the number of rows this call
+             * will consume.  Without this, a fetchArray-sized advance discards
+             * unprocessed buffered rows when the caller uses -max N < fetchArray
+             * across multiple orafetch calls. */
+            uint32_t batchLimit = (maxRows > 0 && maxRows < (Tcl_WideInt)st->fetchArray) ? (uint32_t)maxRows : st->fetchArray;
+            if (batchPos >= batchCount) {
+                if (!moreRows)
                     break;
-                continue;
+
+                /* I6: gate is held only for the duration of one batch fetch
+                 * (which may trigger a network round-trip), then released
+                 * before processing any rows — allows async workers and
+                 * adopted-connection threads to acquire the gate between
+                 * batches. */
+                Oradpi_SharedConnGateEnter(fetchShared);
+                if (dpiStmt_fetchRows(fetchStmt, batchLimit, &batchStart, &batchCount, &moreRows) != DPI_SUCCESS) {
+                    Oradpi_SharedConnGateLeave(fetchShared);
+                    code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_fetchRows");
+                    goto cleanup;
+                }
+                Oradpi_SharedConnGateLeave(fetchShared);
+
+                if (batchCount == 0)
+                    break;
+                batchPos = 0;
             }
-            if (evalCode != TCL_OK) {
-                code = evalCode;
+
+            uint32_t    rowIdx        = batchStart + batchPos++;
+            const char *snapshotWhere = NULL;
+            const char *snapshotMsg   = NULL;
+
+            memset(colVals, 0, colValBytes);
+            FreeFetchCells(cells, numColsSize, fetchShared);
+            memset(cells, 0, cellBytes);
+
+            /* I2: snapshot directly from pre-defined var buffers — no
+             * dpiStmt_getQueryValue calls.  Gate still needed for LOB
+             * columns (dpiLob_addRef); scalar/bytes columns copy data with
+             * no ODPI calls. */
+            Oradpi_SharedConnGateEnter(fetchShared);
+            for (uint32_t c = 0; c < numCols; c++) {
+                dpiData *d = &varData[c][rowIdx];
+                if (SnapshotCellLocked(fetchInlineLobs, nativeTypes[c], d, st->fetchIsChar[c], &cells[c], &snapshotWhere, &snapshotMsg) != TCL_OK) {
+                    Oradpi_SharedConnGateLeave(fetchShared);
+                    if (snapshotWhere)
+                        code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, snapshotWhere);
+                    else {
+                        Tcl_SetObjResult(ip, Tcl_NewStringObj(snapshotMsg ? snapshotMsg : "failed to snapshot fetched value", -1));
+                        code = TCL_ERROR;
+                    }
+                    goto cleanup;
+                }
+            }
+            Oradpi_SharedConnGateLeave(fetchShared);
+
+            /* --- Reentrancy zone --- */
+            for (uint32_t c = 0; c < numCols; c++) {
+                colVals[c] = SnapshotCellToObj(ip, fetchShared, &cells[c]);
+                if (!colVals[c]) {
+                    code = TCL_ERROR;
+                    goto cleanup;
+                }
+            }
+
+            if (dataVar || rowsList) {
+                rowObj = Tcl_NewListObj(0, NULL);
+                Tcl_IncrRefCount(rowObj);
+                for (uint32_t c = 0; c < numCols; c++) {
+                    if (asDict) {
+                        LAPPEND_GOTO(ip, rowObj, colNames[c], code, cleanup);
+                        LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
+                    } else {
+                        LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
+                    }
+                }
+            }
+
+            if (dataArray) {
+                if (indexByNumber) {
+                    for (uint32_t c = 0; c < numCols; c++) {
+                        if (!Tcl_ObjSetVar2(ip, dataArray, numberKeys[c], colVals[c], TCL_LEAVE_ERR_MSG)) {
+                            code = TCL_ERROR;
+                            goto cleanup;
+                        }
+                    }
+                    if (!Oradpi_LookupStmt(ip, stmtNameSnap))
+                        fetchDead = 1;
+                } else if (indexByName) {
+                    for (uint32_t c = 0; c < numCols; c++) {
+                        if (!Tcl_ObjSetVar2(ip, dataArray, colNames[c], colVals[c], TCL_LEAVE_ERR_MSG)) {
+                            code = TCL_ERROR;
+                            goto cleanup;
+                        }
+                    }
+                    if (!Oradpi_LookupStmt(ip, stmtNameSnap))
+                        fetchDead = 1;
+                }
+            }
+
+            if (!fetchDead && dataVar && !Tcl_ObjSetVar2(ip, dataVar, NULL, rowObj, TCL_LEAVE_ERR_MSG)) {
+                code = TCL_ERROR;
                 goto cleanup;
             }
+            if (!fetchDead && dataVar && !Oradpi_LookupStmt(ip, stmtNameSnap))
+                fetchDead = 1;
+
+            if (!fetchDead && cmd) {
+                int evalCode = Tcl_EvalObjEx(ip, cmd, TCL_EVAL_GLOBAL);
+                if (!Oradpi_LookupStmt(ip, stmtNameSnap))
+                    fetchDead = 1;
+                if (evalCode == TCL_BREAK) {
+                    if (rowObj) {
+                        Tcl_DecrRefCount(rowObj);
+                        rowObj = NULL;
+                    }
+                    memset(colVals, 0, colValBytes);
+                    fetched++;
+                    break;
+                }
+                if (evalCode == TCL_CONTINUE) {
+                    if (rowObj) {
+                        Tcl_DecrRefCount(rowObj);
+                        rowObj = NULL;
+                    }
+                    memset(colVals, 0, colValBytes);
+                    fetched++;
+                    if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
+                        break;
+                    continue;
+                }
+                if (evalCode != TCL_OK) {
+                    code = evalCode;
+                    goto cleanup;
+                }
+            }
+
+            if (rowsList) {
+                LAPPEND_GOTO(ip, rowsList, rowObj, code, cleanup);
+            }
+            if (rowObj) {
+                Tcl_DecrRefCount(rowObj);
+                rowObj = NULL;
+            }
+            /* rowObj may have owned colVals[] elements; zero before next row. */
+            memset(colVals, 0, colValBytes);
+            fetched++;
+            if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
+                break;
         }
+    } else {
+        /* ------------------------------------------------------------------
+         * FALLBACK PATH: original dpiStmt_fetch + dpiStmt_getQueryValue
+         * ------------------------------------------------------------------ */
+        for (;;) {
+            int         hasRow         = 0;
+            uint32_t    bufferRowIndex = 0;
+            const char *snapshotWhere  = NULL;
+            const char *snapshotMsg    = NULL;
 
-        if (rowsList) {
-            LAPPEND_GOTO(ip, rowsList, rowObj, code, cleanup);
+            if (fetchDead) {
+                Tcl_SetObjResult(ip, Tcl_NewStringObj("orafetch: statement closed during callback", -1));
+                code = TCL_ERROR;
+                goto cleanup;
+            }
+
+            memset(colVals, 0, colValBytes);
+            FreeFetchCells(cells, numColsSize, fetchShared);
+            memset(cells, 0, cellBytes);
+
+            Oradpi_SharedConnGateEnter(fetchShared);
+            if (dpiStmt_fetch(fetchStmt, &hasRow, &bufferRowIndex) != DPI_SUCCESS) {
+                Oradpi_SharedConnGateLeave(fetchShared);
+                code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_fetch");
+                goto cleanup;
+            }
+            (void)bufferRowIndex;
+            if (!hasRow) {
+                Oradpi_SharedConnGateLeave(fetchShared);
+                break;
+            }
+
+            for (uint32_t c = 1; c <= numCols; c++) {
+                dpiNativeTypeNum nt;
+                dpiData         *d = NULL;
+                if (dpiStmt_getQueryValue(fetchStmt, c, &nt, &d) != DPI_SUCCESS) {
+                    Oradpi_SharedConnGateLeave(fetchShared);
+                    code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, "dpiStmt_getQueryValue");
+                    goto cleanup;
+                }
+                if (SnapshotCellLocked(fetchInlineLobs, nt, d, st->fetchIsChar[c - 1], &cells[c - 1], &snapshotWhere, &snapshotMsg) != TCL_OK) {
+                    Oradpi_SharedConnGateLeave(fetchShared);
+                    if (snapshotWhere)
+                        code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, snapshotWhere);
+                    else {
+                        Tcl_SetObjResult(ip, Tcl_NewStringObj(snapshotMsg ? snapshotMsg : "failed to snapshot fetched value", -1));
+                        code = TCL_ERROR;
+                    }
+                    goto cleanup;
+                }
+            }
+            Oradpi_SharedConnGateLeave(fetchShared);
+
+            /* --- Reentrancy zone --- */
+            for (uint32_t c = 0; c < numCols; c++) {
+                colVals[c] = SnapshotCellToObj(ip, fetchShared, &cells[c]);
+                if (!colVals[c]) {
+                    code = TCL_ERROR;
+                    goto cleanup;
+                }
+            }
+
+            if (dataVar || rowsList) {
+                rowObj = Tcl_NewListObj(0, NULL);
+                Tcl_IncrRefCount(rowObj);
+                for (uint32_t c = 0; c < numCols; c++) {
+                    if (asDict) {
+                        LAPPEND_GOTO(ip, rowObj, colNames[c], code, cleanup);
+                        LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
+                    } else {
+                        LAPPEND_GOTO(ip, rowObj, colVals[c], code, cleanup);
+                    }
+                }
+            }
+
+            if (dataArray) {
+                if (indexByNumber) {
+                    for (uint32_t c = 0; c < numCols; c++) {
+                        if (!Tcl_ObjSetVar2(ip, dataArray, numberKeys[c], colVals[c], TCL_LEAVE_ERR_MSG)) {
+                            code = TCL_ERROR;
+                            goto cleanup;
+                        }
+                    }
+                    if (!Oradpi_LookupStmt(ip, stmtNameSnap))
+                        fetchDead = 1;
+                } else if (indexByName) {
+                    for (uint32_t c = 0; c < numCols; c++) {
+                        if (!Tcl_ObjSetVar2(ip, dataArray, colNames[c], colVals[c], TCL_LEAVE_ERR_MSG)) {
+                            code = TCL_ERROR;
+                            goto cleanup;
+                        }
+                    }
+                    if (!Oradpi_LookupStmt(ip, stmtNameSnap))
+                        fetchDead = 1;
+                }
+            }
+
+            if (!fetchDead && dataVar && !Tcl_ObjSetVar2(ip, dataVar, NULL, rowObj, TCL_LEAVE_ERR_MSG)) {
+                code = TCL_ERROR;
+                goto cleanup;
+            }
+            if (!fetchDead && dataVar && !Oradpi_LookupStmt(ip, stmtNameSnap))
+                fetchDead = 1;
+
+            if (!fetchDead && cmd) {
+                int evalCode = Tcl_EvalObjEx(ip, cmd, TCL_EVAL_GLOBAL);
+                if (!Oradpi_LookupStmt(ip, stmtNameSnap))
+                    fetchDead = 1;
+                if (evalCode == TCL_BREAK) {
+                    if (rowObj) {
+                        Tcl_DecrRefCount(rowObj);
+                        rowObj = NULL;
+                    }
+                    memset(colVals, 0, colValBytes);
+                    fetched++;
+                    break;
+                }
+                if (evalCode == TCL_CONTINUE) {
+                    if (rowObj) {
+                        Tcl_DecrRefCount(rowObj);
+                        rowObj = NULL;
+                    }
+                    memset(colVals, 0, colValBytes);
+                    fetched++;
+                    if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
+                        break;
+                    continue;
+                }
+                if (evalCode != TCL_OK) {
+                    code = evalCode;
+                    goto cleanup;
+                }
+            }
+
+            if (rowsList) {
+                LAPPEND_GOTO(ip, rowsList, rowObj, code, cleanup);
+            }
+            if (rowObj) {
+                Tcl_DecrRefCount(rowObj);
+                rowObj = NULL;
+            }
+            /* rowObj may have owned colVals[] elements; zero before next row. */
+            memset(colVals, 0, colValBytes);
+            fetched++;
+            if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
+                break;
         }
-
-        Tcl_DecrRefCount(rowObj);
-        rowObj = NULL;
-        /* Freeing rowObj may have freed the colVals[] elements it owned.
-         * Zero the array so cleanup never touches dangling pointers. */
-        memset(colVals, 0, colValBytes);
-
-        fetched++;
-        if (maxRows > 0 && (Tcl_WideInt)fetched >= maxRows)
-            break;
     }
 
     if (resultVar) {
@@ -773,6 +1086,7 @@ cleanup:
         }
         Tcl_Free((char *)colNames);
     }
-    FreeFetchMeta(meta, numColsSize);
+    if (meta)
+        FreeFetchMeta(meta, numColsSize);
     return code;
 }

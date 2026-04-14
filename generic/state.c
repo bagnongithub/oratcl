@@ -514,6 +514,7 @@ void Oradpi_FreeStmt(Tcl_Interp *ip, OradpiStmt *s) {
         s->stmt = NULL;
     }
     s->owner = NULL;
+    Oradpi_FreeFetchCache(s);
     /* Clean up bind stores and pending refs for this statement */
     if (ip && s->base.name) {
         const char *skey = Tcl_GetString(s->base.name);

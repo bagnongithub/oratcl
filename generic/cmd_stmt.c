@@ -329,21 +329,28 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
             break;
         }
         case COPT_FOCLASSES: {
-            Tcl_Obj **el = NULL;
-            Tcl_Size  n  = 0;
-            if (Tcl_ListObjGetElements(ip, objv[i + 1], &n, &el) != TCL_OK)
+            Tcl_Size n = 0;
+            if (Tcl_ListObjLength(ip, objv[i + 1], &n) != TCL_OK)
                 return TCL_ERROR;
             uint32_t m = 0;
             for (Tcl_Size k = 0; k < n; k++) {
-                const char *t = Tcl_GetString(el[k]);
+                Tcl_Obj *el = NULL;
+                Tcl_ListObjIndex(ip, objv[i + 1], k, &el);
+                Tcl_IncrRefCount(el);
+                const char *t       = Tcl_GetString(el);
+                int         unknown = 0;
                 if (strcmp(t, "network") == 0)
                     m |= ORADPI_FO_CLASS_NETWORK;
                 else if (strcmp(t, "connlost") == 0)
                     m |= ORADPI_FO_CLASS_CONNLOST;
-                else {
+                else
+                    unknown = 1;
+                if (unknown) {
                     Tcl_SetObjResult(ip, Tcl_ObjPrintf("unknown foErrorClasses value \"%s\"", t));
+                    Tcl_DecrRefCount(el);
                     return TCL_ERROR;
                 }
+                Tcl_DecrRefCount(el);
             }
             co->foErrorClasses = m;
             break;
@@ -434,6 +441,10 @@ static int Oradpi_ConfigStmt(Tcl_Interp *ip, OradpiStmt *s, Tcl_Size objc, Tcl_O
         case SOPT_FETCHROWS: {
             if (GetRequiredPositiveU32(ip, objv[3], &s->fetchArray, "fetchrows") != TCL_OK)
                 return TCL_ERROR;
+            /* The output variable cache (I2) is sized to the old fetchArray.
+             * Invalidate it so the next orafetch rebuilds vars with the new
+             * maxArraySize; otherwise direct buffer access would overflow. */
+            Oradpi_FreeFetchCache(s);
             if (s->stmt) {
                 CONN_GATE_ENTER(s->owner);
                 if (dpiStmt_setFetchArraySize(s->stmt, s->fetchArray) != DPI_SUCCESS) {
@@ -532,6 +543,7 @@ int Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
         dpiStmt_release(s->stmt);
         s->stmt = NULL;
     }
+    Oradpi_FreeFetchCache(s);
 
     if (dpiConn_prepareStmt(s->owner->conn, 0, sql, (uint32_t)sqlLen, NULL, 0, &s->stmt) != DPI_SUCCESS) {
         CONN_GATE_LEAVE(s->owner);

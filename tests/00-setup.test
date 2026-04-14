@@ -1,5 +1,5 @@
 # -*-Tcl-*-
-# 00-setup.test — test harness bootstrap for Oratcl 9.0 (ODPI) — tcltest 2.5
+# 00-setup.test — test harness bootstrap for Oratcl 9.1 (ODPI) — tcltest 2.5
 # Assumptions:
 #   - ORATCL_CONNECT env var contains a valid connect string (user/pw@host/service)
 #   - The package "oratcl" (this repo's module) is locatable via auto_path or TCLLIBPATH
@@ -147,7 +147,7 @@ namespace eval ::OratclTest {
 # Smoke: can we load the package at all?
 test 00-0.1 {package loads} -body {
     package require oratcl 9.1
-} -result 9.0
+} -result 9.1
 
 # If no connect string, skip the rest of DB-dependent files (they still load).
 test 00-0.2 {connect string present} -constraints {have_connect} -body {

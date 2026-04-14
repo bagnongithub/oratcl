@@ -15,6 +15,7 @@
 
 #include <inttypes.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <string.h>
 #ifndef USE_TCL_STUBS
 #define USE_TCL_STUBS
@@ -28,32 +29,29 @@
  * Forward Declarations
  * ========================================================================== */
 
-static int       Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags);
-static void      Oradpi_FailoverTimerProc(void *clientData);
-Tcl_Obj         *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix);
-static void      Oradpi_PostFailoverEvent(OradpiConn *co, Tcl_Obj *message);
-void             Oradpi_RecordRows(OradpiBase *h, uint64_t rows);
-int              Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int code, const char *msg);
-int              Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *where);
-int              Oradpi_SetErrorFromODPIInfo(Tcl_Interp *ip, OradpiBase *h, const char *where, const dpiErrorInfo *ei);
-void             Oradpi_UpdateStmtType(OradpiStmt *s);
-static void      ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val);
+static int              Oradpi_FailoverEventProc(Tcl_Event *evPtr, int flags);
+static void             Oradpi_FailoverTimerProc(void *clientData);
+Tcl_Obj                *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix);
+static void             Oradpi_PostFailoverEvent(OradpiConn *co, Tcl_Obj *message);
+void                    Oradpi_RecordRows(OradpiBase *h, uint64_t rows);
+int                     Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int code, const char *msg);
+int                     Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *where);
+int                     Oradpi_SetErrorFromODPIInfo(Tcl_Interp *ip, OradpiBase *h, const char *where, const dpiErrorInfo *ei);
+void                    Oradpi_UpdateStmtType(OradpiStmt *s);
+static void             ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val);
 
 /* ------------------------------------------------------------------------- *
  * Implementation
  * ------------------------------------------------------------------------- */
 
-/* gHandleMutex: protects the static 'counter' in Oradpi_NewHandleName.
- * Lock ordering: leaf lock, no other locks held while this is held. */
-static Tcl_Mutex gHandleMutex;
+/* gHandleCounter: process-wide monotonic handle ID.  Uses a lock-free
+ * relaxed atomic increment — uniqueness is the only requirement; strict
+ * ordering relative to other memory operations is not needed. */
+static _Atomic uint64_t gHandleCounter = 0;
 
-Tcl_Obj         *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix) {
+Tcl_Obj                *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix) {
     (void)ip;
-    static uint64_t counter = 0;
-
-    Tcl_MutexLock(&gHandleMutex);
-    uint64_t id = ++counter;
-    Tcl_MutexUnlock(&gHandleMutex);
+    uint64_t id = atomic_fetch_add_explicit(&gHandleCounter, 1, memory_order_relaxed) + 1;
     return Tcl_ObjPrintf("%s%" PRIu64, prefix, id);
 }
 

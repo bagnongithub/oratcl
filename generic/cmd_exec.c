@@ -213,6 +213,10 @@ int Oradpi_Cmd_StmtSql(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const o
         dpiStmt_release(s->stmt);
     }
     s->stmt = newStmt;
+    Oradpi_FreeFetchCache(s);
+    /* I4: this SQL is executed once and discarded; exclude it from the
+     * statement cache so it does not evict frequently reused statements. */
+    dpiStmt_deleteFromCache(s->stmt);
     CONN_GATE_LEAVE(s->owner);
 
     const char *skey = Tcl_GetString(objv[1]);
@@ -277,6 +281,9 @@ int Oradpi_Cmd_Plexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const ob
             dpiStmt_release(s->stmt);
         }
         s->stmt = newStmt;
+        Oradpi_FreeFetchCache(s);
+        /* I4: one-shot PL/SQL block — exclude from statement cache. */
+        dpiStmt_deleteFromCache(s->stmt);
         CONN_GATE_LEAVE(s->owner);
         Oradpi_ClearBindStoreForStmt(ip, Tcl_GetString(objv[1]));
     }

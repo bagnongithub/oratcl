@@ -235,6 +235,7 @@ OradpiStmt        *Oradpi_LookupStmt(Tcl_Interp *ip, Tcl_Obj *nameObj);
 OradpiLob         *Oradpi_NewLob(Tcl_Interp *ip, dpiLob *lob, GlobalConnRec *shared);
 void               Oradpi_FreeConn(OradpiConn *co);
 void               Oradpi_FreeStmt(Tcl_Interp *ip, OradpiStmt *s);
+void               Oradpi_FreeFetchCache(OradpiStmt *s);
 void               Oradpi_FreeLob(OradpiLob *l);
 void               Oradpi_DeleteInterpData(void *clientData, Tcl_Interp *ip);
 void               Oradpi_RemoveStmt(Tcl_Interp *ip, OradpiStmt *s);

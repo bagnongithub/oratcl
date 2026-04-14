@@ -152,12 +152,19 @@ static int BindVarByNameDual(OradpiStmt *s, const char *nameNoColon, dpiVar *var
         return TCL_OK;
     }
 
-    /* guard narrowing of bind name length */
-    Tcl_Size rawLen = (Tcl_Size)strlen(nameNoColon);
-    uint32_t nlen   = 0;
-    if (CheckU32(ip, rawLen, &nlen) != TCL_OK) {
-        CONN_GATE_LEAVE(s->owner);
-        return TCL_ERROR;
+    /* m = strlen(nameNoColon)+1 when the colon-prefixed name fit in buf.
+     * Reuse it to derive the bare-name length instead of calling strlen
+     * a second time.  Only fall back to strlen when m==0 (name exceeded
+     * buf[256] capacity — not a normal Oracle identifier). */
+    uint32_t nlen;
+    if (m > 0) {
+        nlen = m - 1;
+    } else {
+        Tcl_Size rawLen = (Tcl_Size)strlen(nameNoColon);
+        if (CheckU32(ip, rawLen, &nlen) != TCL_OK) {
+            CONN_GATE_LEAVE(s->owner);
+            return TCL_ERROR;
+        }
     }
     if (dpiStmt_bindByName(s->stmt, nameNoColon, nlen, var) == DPI_SUCCESS) {
         CONN_GATE_LEAVE(s->owner);
@@ -177,12 +184,19 @@ static int BindValueByNameDual(OradpiStmt *s, const char *nameNoColon, dpiNative
         return TCL_OK;
     }
 
-    /* guard narrowing of bind name length */
-    Tcl_Size rawLen = (Tcl_Size)strlen(nameNoColon);
-    uint32_t nlen   = 0;
-    if (CheckU32(ip, rawLen, &nlen) != TCL_OK) {
-        CONN_GATE_LEAVE(s->owner);
-        return TCL_ERROR;
+    /* m = strlen(nameNoColon)+1 when the colon-prefixed name fit in buf.
+     * Reuse it to derive the bare-name length instead of calling strlen
+     * a second time.  Only fall back to strlen when m==0 (name exceeded
+     * buf[256] capacity — not a normal Oracle identifier). */
+    uint32_t nlen;
+    if (m > 0) {
+        nlen = m - 1;
+    } else {
+        Tcl_Size rawLen = (Tcl_Size)strlen(nameNoColon);
+        if (CheckU32(ip, rawLen, &nlen) != TCL_OK) {
+            CONN_GATE_LEAVE(s->owner);
+            return TCL_ERROR;
+        }
     }
     if (dpiStmt_bindValueByName(s->stmt, nameNoColon, nlen, ntn, d) == DPI_SUCCESS) {
         CONN_GATE_LEAVE(s->owner);
@@ -651,7 +665,6 @@ int Oradpi_Cmd_Orabind(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const o
 typedef struct ArrSpec {
     const char      *nameNoColon;
     Tcl_Obj         *listObj;
-    Tcl_Obj        **elems;
     Tcl_Size         count;
     dpiOracleTypeNum ora;
     dpiNativeTypeNum nat;
@@ -758,7 +771,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             as->listObj     = objv[j + 1];
             Tcl_IncrRefCount(as->listObj);
 
-            if (Tcl_ListObjGetElements(ip, as->listObj, &as->count, &as->elems) != TCL_OK) {
+            if (Tcl_ListObjLength(ip, as->listObj, &as->count) != TCL_OK) {
                 FreeArrSpecs(specs, nSpecs + 1, 0);
                 return TCL_ERROR;
             }
@@ -768,7 +781,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             if (as->count != expected) {
                 Tcl_Obj *msg = Tcl_NewStringObj("-arraydml list lengths mismatch: :", -1);
                 Tcl_AppendToObj(msg, as->nameNoColon, -1);
-                Tcl_AppendPrintfToObj(msg, " has %td vs expected %td", (ptrdiff_t)as->count, (ptrdiff_t)expected);
+                Tcl_AppendPrintfToObj(msg, " has %" TCL_SIZE_MODIFIER "d vs expected %" TCL_SIZE_MODIFIER "d", as->count, expected);
                 FreeArrSpecs(specs, nSpecs + 1, 0);
                 Tcl_SetObjResult(ip, msg);
                 return TCL_ERROR;
@@ -782,22 +795,27 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
              * Only use numeric type if every element parses as that type. */
             int allInt = 1, allNumeric = 1;
             for (Tcl_Size p = 0; p < as->count; p++) {
+                Tcl_Obj *ep = NULL;
+                Tcl_ListObjIndex(ip, as->listObj, p, &ep);
+                Tcl_IncrRefCount(ep);
                 Tcl_WideInt wi;
                 double      dd;
-                if (Tcl_GetWideIntFromObj(NULL, as->elems[p], &wi) != TCL_OK)
+                if (Tcl_GetWideIntFromObj(NULL, ep, &wi) != TCL_OK)
                     allInt = 0;
-                if (allInt == 0 && Tcl_GetDoubleFromObj(NULL, as->elems[p], &dd) != TCL_OK)
+                if (allInt == 0 && Tcl_GetDoubleFromObj(NULL, ep, &dd) != TCL_OK)
                     allNumeric = 0;
                 /* use CheckU32 instead of raw (uint32_t) cast */
                 Tcl_Size sl = 0;
-                (void)Tcl_GetStringFromObj(as->elems[p], &sl);
+                (void)Tcl_GetStringFromObj(ep, &sl);
                 uint32_t sl32 = 0;
                 if (CheckU32(ip, sl, &sl32) != TCL_OK) {
+                    Tcl_DecrRefCount(ep);
                     FreeArrSpecs(specs, nSpecs + 1, 0);
                     return TCL_ERROR;
                 }
                 if (sl32 > as->elemSize)
                     as->elemSize = sl32;
+                Tcl_DecrRefCount(ep);
             }
             if (allInt) {
                 as->ora = DPI_ORACLE_TYPE_NUMBER;
@@ -861,12 +879,15 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             }
 
             for (uint32_t r = 0; r < iters; r++) {
-                Tcl_Obj *e = as->elems[r];
+                Tcl_Obj *e = NULL;
+                Tcl_ListObjIndex(ip, as->listObj, (Tcl_Size)r, &e);
+                Tcl_IncrRefCount(e);
                 if (as->nat == DPI_NATIVE_TYPE_INT64) {
                     Tcl_WideInt wi;
                     /* check return code — element may have been mutated
                      * or may overflow Tcl_WideInt range since the pre-scan. */
                     if (Tcl_GetWideIntFromObj(NULL, e, &wi) != TCL_OK) {
+                        Tcl_DecrRefCount(e);
                         Tcl_SetObjResult(ip, Tcl_ObjPrintf("orabindexec -arraydml: element %u is not a valid integer", r));
                         FreeArrSpecs(specs, nSpecs, iters);
                         return TCL_ERROR;
@@ -877,6 +898,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                     double dd;
                     /* check return code */
                     if (Tcl_GetDoubleFromObj(NULL, e, &dd) != TCL_OK) {
+                        Tcl_DecrRefCount(e);
                         Tcl_SetObjResult(ip, Tcl_ObjPrintf("orabindexec -arraydml: element %u is not a valid number", r));
                         FreeArrSpecs(specs, nSpecs, iters);
                         return TCL_ERROR;
@@ -889,6 +911,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                     /* guard narrowing to uint32_t */
                     uint32_t    sl32 = 0;
                     if (CheckU32(ip, sl, &sl32) != TCL_OK) {
+                        Tcl_DecrRefCount(e);
                         FreeArrSpecs(specs, nSpecs, iters);
                         return TCL_ERROR;
                     }
@@ -896,6 +919,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                     if (sl > 0) {
                         size_t elemBytes = 0;
                         if (Oradpi_CheckedTclSizeToSizeT(ip, sl, &elemBytes, "array DML element size") != TCL_OK) {
+                            Tcl_DecrRefCount(e);
                             FreeArrSpecs(specs, nSpecs, iters);
                             return TCL_ERROR;
                         }
@@ -910,6 +934,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                     as->data[r].value.asBytes.length   = sl32;
                     as->data[r].value.asBytes.encoding = enc.encoding;
                 }
+                Tcl_DecrRefCount(e);
             }
 
             if (BindVarByNameDual(s, as->nameNoColon, as->var, ip, "dpiStmt_bindByName(array)") != TCL_OK) {
@@ -938,6 +963,36 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             CONN_GATE_LEAVE(s->owner);
             FreeArrSpecs(specs, nSpecs, iters);
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_executeMany");
+        }
+
+        /* I5: when DPI_MODE_EXEC_BATCH_ERRORS is set, individual row failures
+         * are collected rather than aborting the whole batch.  Inspect the
+         * error array and report any failures back to the caller as a Tcl
+         * list of {rowOffset oraCode message} triples. */
+        if (mode & DPI_MODE_EXEC_BATCH_ERRORS) {
+            uint32_t errCount = 0;
+            if (dpiStmt_getBatchErrorCount(s->stmt, &errCount) == DPI_SUCCESS && errCount > 0) {
+                dpiErrorInfo *errs     = (dpiErrorInfo *)Tcl_Alloc(errCount * sizeof(dpiErrorInfo));
+                int           reported = (dpiStmt_getBatchErrors(s->stmt, errCount, errs) == DPI_SUCCESS);
+                if (reported) {
+                    Tcl_Obj *errList = Tcl_NewListObj(0, NULL);
+                    for (uint32_t e = 0; e < errCount; e++) {
+                        Tcl_Obj *triple = Tcl_NewListObj(0, NULL);
+                        Tcl_ListObjAppendElement(ip, triple, Tcl_NewWideIntObj((Tcl_WideInt)errs[e].offset));
+                        Tcl_ListObjAppendElement(ip, triple, Tcl_NewWideIntObj((Tcl_WideInt)errs[e].code));
+                        Tcl_ListObjAppendElement(ip, triple, Tcl_NewStringObj(errs[e].message ? errs[e].message : "", -1));
+                        Tcl_ListObjAppendElement(ip, errList, triple);
+                    }
+                    Tcl_Free((char *)errs);
+                    CONN_GATE_LEAVE(s->owner);
+                    FreeArrSpecs(specs, nSpecs, iters);
+                    /* Store in oramsg for introspection, and return error */
+                    Tcl_SetObjResult(ip, errList);
+                    Tcl_SetErrorCode(ip, "ORATCL", "BATCH", NULL);
+                    return TCL_ERROR;
+                }
+                Tcl_Free((char *)errs);
+            }
         }
 
         uint64_t rows = 0;
