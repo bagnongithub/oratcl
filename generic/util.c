@@ -93,6 +93,9 @@ void Oradpi_UpdateStmtType(OradpiStmt *s) {
     else if (info.isReturning)
         t = 5;
     s->base.msg.sqltype = t;
+    s->stmtIsDML        = info.isDML ? 1 : 0;
+    s->stmtIsPLSQL      = info.isPLSQL ? 1 : 0;
+    s->stmtIsQuery      = info.isQuery ? 1 : 0;
 }
 
 typedef struct OradpiFailoverEvent {

@@ -672,20 +672,23 @@ typedef struct ArrSpec {
     int              sizeIsBytes;
     dpiVar          *var;
     dpiData         *data;
-    char           **ownedBufs;
+    /* For BYTES columns: array of IncrRefCount'd source Tcl_Obj* whose
+     * string buffers are pointed to by data[r].value.asBytes.ptr.  No
+     * heap copy is made.  DecrRefCount'd by FreeArrSpecs after execute. */
+    Tcl_Obj        **pinnedElems;
 } ArrSpec;
 
 /* Free all resources held by an array of ArrSpec entries.
- * nSpecs: number of valid entries; iters: row count for ownedBufs. */
+ * nSpecs: number of valid entries; iters: row count for pinnedElems. */
 static void FreeArrSpecs(ArrSpec *specs, Tcl_Size nSpecs, uint32_t iters) {
     for (Tcl_Size t = 0; t < nSpecs; t++) {
         if (specs[t].var)
             dpiVar_release(specs[t].var);
-        if (specs[t].ownedBufs) {
+        if (specs[t].pinnedElems) {
             for (uint32_t r = 0; r < iters; r++)
-                if (specs[t].ownedBufs[r])
-                    Tcl_Free(specs[t].ownedBufs[r]);
-            Tcl_Free((char *)specs[t].ownedBufs);
+                if (specs[t].pinnedElems[r])
+                    Tcl_DecrRefCount(specs[t].pinnedElems[r]);
+            Tcl_Free((char *)specs[t].pinnedElems);
         }
         if (specs[t].listObj)
             Tcl_DecrRefCount(specs[t].listObj);
@@ -867,15 +870,15 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             CONN_GATE_LEAVE(s->owner);
 
             if (as->nat == DPI_NATIVE_TYPE_BYTES) {
-                size_t ownedBufBytes = 0;
-                if (Oradpi_CheckedAllocBytes(ip, (Tcl_Size)iters, sizeof(char *), &ownedBufBytes, "array DML buffer table") != TCL_OK) {
+                size_t pinnedBytes = 0;
+                if (Oradpi_CheckedAllocBytes(ip, (Tcl_Size)iters, sizeof(Tcl_Obj *), &pinnedBytes, "array DML pin table") != TCL_OK) {
                     FreeArrSpecs(specs, nSpecs, iters);
                     return TCL_ERROR;
                 }
-                as->ownedBufs = (char **)Tcl_Alloc(ownedBufBytes);
-                memset(as->ownedBufs, 0, ownedBufBytes);
+                as->pinnedElems = (Tcl_Obj **)Tcl_Alloc(pinnedBytes);
+                memset(as->pinnedElems, 0, pinnedBytes);
             } else {
-                as->ownedBufs = NULL;
+                as->pinnedElems = NULL;
             }
 
             for (uint32_t r = 0; r < iters; r++) {
@@ -915,24 +918,16 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                         FreeArrSpecs(specs, nSpecs, iters);
                         return TCL_ERROR;
                     }
-                    char *buf = NULL;
-                    if (sl > 0) {
-                        size_t elemBytes = 0;
-                        if (Oradpi_CheckedTclSizeToSizeT(ip, sl, &elemBytes, "array DML element size") != TCL_OK) {
-                            Tcl_DecrRefCount(e);
-                            FreeArrSpecs(specs, nSpecs, iters);
-                            return TCL_ERROR;
-                        }
-                        buf = (char *)Tcl_Alloc(elemBytes);
-                        memcpy(buf, sv, elemBytes);
-                    } else {
-                        buf = (char *)Tcl_Alloc(1);
-                    }
-                    as->ownedBufs[r]                   = buf;
+                    /* Point directly at the Tcl-managed string buffer.
+                     * The element is pinned (IncrRefCount) so it cannot be
+                     * freed or shimmered during dpiStmt_executeMany.
+                     * FreeArrSpecs DecrRefCounts all pinnedElems after execute. */
+                    as->pinnedElems[r]                 = e; /* transfer ownership; skip DecrRefCount below */
                     as->data[r].isNull                 = 0;
-                    as->data[r].value.asBytes.ptr      = buf;
+                    as->data[r].value.asBytes.ptr      = (char *)sv;
                     as->data[r].value.asBytes.length   = sl32;
                     as->data[r].value.asBytes.encoding = enc.encoding;
+                    continue; /* skip the DecrRefCount at end of loop */
                 }
                 Tcl_DecrRefCount(e);
             }
@@ -943,19 +938,10 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             }
         }
 
-        dpiStmtInfo info;
-        CONN_GATE_ENTER(s->owner);
-        if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS) {
-            CONN_GATE_LEAVE(s->owner);
-            FreeArrSpecs(specs, nSpecs, iters);
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_getInfo");
-        }
-        CONN_GATE_LEAVE(s->owner);
-
         dpiExecMode mode = DPI_MODE_EXEC_DEFAULT;
-        if (info.isDML)
+        if (s->stmtIsDML)
             mode |= DPI_MODE_EXEC_BATCH_ERRORS;
-        if (doCommit || (s->owner && s->owner->autocommit && (info.isDML || info.isPLSQL)))
+        if (doCommit || (s->owner && s->owner->autocommit && (s->stmtIsDML || s->stmtIsPLSQL)))
             mode |= DPI_MODE_EXEC_COMMIT_ON_SUCCESS;
 
         CONN_GATE_ENTER(s->owner);
@@ -965,7 +951,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_executeMany");
         }
 
-        /* I5: when DPI_MODE_EXEC_BATCH_ERRORS is set, individual row failures
+        /* When DPI_MODE_EXEC_BATCH_ERRORS is set, individual row failures
          * are collected rather than aborting the whole batch.  Inspect the
          * error array and report any failures back to the caller as a Tcl
          * list of {rowOffset oraCode message} triples. */
@@ -1025,17 +1011,8 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
         k += 2;
     }
 
-    dpiStmtInfo info;
-    CONN_GATE_ENTER(s->owner);
-    if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS) {
-        CONN_GATE_LEAVE(s->owner);
-        Oradpi_PendingsReleaseAll(pr);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_getInfo");
-    }
-    CONN_GATE_LEAVE(s->owner);
-
     dpiExecMode mode = DPI_MODE_EXEC_DEFAULT;
-    if (doCommit || (s->owner && s->owner->autocommit && (info.isDML || info.isPLSQL)))
+    if (doCommit || (s->owner && s->owner->autocommit && (s->stmtIsDML || s->stmtIsPLSQL)))
         mode |= DPI_MODE_EXEC_COMMIT_ON_SUCCESS;
 
     uint32_t nqc = 0;

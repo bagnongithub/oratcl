@@ -558,7 +558,7 @@ static void AsyncWorkerBody(const char *key) {
     }
     Oradpi_SharedConnGateLeave(ae->shared);
 
-    /* Execute with retry/backoff if failover policy is configured (SUG-4).
+    /* Execute with retry/backoff when failover policy is configured.
      * maxAttempts/backoffMs/backoffFact/errClasses are already snapshotted above. */
 
     int          execRc = DPI_FAILURE;

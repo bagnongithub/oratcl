@@ -108,10 +108,8 @@ static void GlobalConnMap_ExitHandler(void *unused) {
                 if (gr->refCount > 0)
                     continue; /* still referenced — skip to avoid UaF */
                 /* Close and release pool at process exit. */
-                if (gr->pool) {
-                    dpiPool_close(gr->pool, DPI_MODE_POOL_CLOSE_DEFAULT);
-                    dpiPool_release(gr->pool);
-                }
+                if (gr->pool)
+                    Oradpi_PoolRelease(gr->pool);
                 Tcl_ConditionFinalize(&gr->connCond);
                 Tcl_MutexFinalize(&gr->connLock);
                 if (gr->nameKey)
@@ -237,8 +235,7 @@ void Oradpi_SharedConnRelease(GlobalConnRec *gr) {
         /* Close and release the shared pool now that no wrappers or
          * async workers reference this connection anymore. */
         if (gr->pool) {
-            dpiPool_close(gr->pool, DPI_MODE_POOL_CLOSE_DEFAULT);
-            dpiPool_release(gr->pool);
+            Oradpi_PoolRelease(gr->pool);
             gr->pool = NULL;
         }
         Tcl_ConditionFinalize(&gr->connCond);

@@ -56,20 +56,16 @@ static int ExecOnce_WithRebind(Tcl_Interp *ip, OradpiStmt *s, const char *skey, 
         return TCL_ERROR;
     }
 
-    dpiStmtInfo info;
-    CONN_GATE_ENTER(s->owner);
-    if (dpiStmt_getInfo(s->stmt, &info) != DPI_SUCCESS) {
-        CONN_GATE_LEAVE(s->owner);
-        Oradpi_PendingsFree(&pr);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_getInfo");
-    }
-    CONN_GATE_LEAVE(s->owner);
-
     dpiExecMode mode = DPI_MODE_EXEC_DEFAULT;
-    if (doCommit || (s->owner && s->owner->autocommit && (info.isDML || info.isPLSQL)))
+    /* stmtIsDML and stmtIsPLSQL are populated by UpdateStmtType after each
+     * prepare or successful execute.  On a freshly prepared statement that
+     * has not yet executed they are 0, so autocommit does not fire on the
+     * first execute.  That is correct: autocommit requires a successful
+     * execute to have occurred before the commit can be meaningful. */
+    if (doCommit || (s->owner && s->owner->autocommit && (s->stmtIsDML || s->stmtIsPLSQL)))
         mode |= DPI_MODE_EXEC_COMMIT_ON_SUCCESS;
 
-    /* SUG-4: Execute with retry/backoff when failover policy is configured */
+    /* Execute with retry/backoff when failover policy is configured */
     uint32_t maxAttempts = s->owner ? s->owner->foMaxAttempts : 0;
     uint32_t backoffMs   = s->owner ? s->owner->foBackoffMs : 100;
     double   backoffFact = s->owner ? s->owner->foBackoffFactor : 2.0;
@@ -214,7 +210,13 @@ int Oradpi_Cmd_StmtSql(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const o
     }
     s->stmt = newStmt;
     Oradpi_FreeFetchCache(s);
-    /* I4: this SQL is executed once and discarded; exclude it from the
+    s->stmtIsDML = s->stmtIsPLSQL = s->stmtIsQuery = 0;
+    /* Prime the classification cache before releasing the gate.
+     * dpiStmt_getInfo does not round-trip; reading it here ensures
+     * ExecOnce_WithRebind sees correct isDML/isPLSQL for autocommit
+     * decisions on the very first execute of this statement. */
+    Oradpi_UpdateStmtType(s);
+    /* This SQL is executed once and discarded; exclude it from the
      * statement cache so it does not evict frequently reused statements. */
     dpiStmt_deleteFromCache(s->stmt);
     CONN_GATE_LEAVE(s->owner);
@@ -282,7 +284,10 @@ int Oradpi_Cmd_Plexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const ob
         }
         s->stmt = newStmt;
         Oradpi_FreeFetchCache(s);
-        /* I4: one-shot PL/SQL block — exclude from statement cache. */
+        s->stmtIsDML = s->stmtIsPLSQL = s->stmtIsQuery = 0;
+        /* Prime classification cache before ExecOnce reads it (no round-trip). */
+        Oradpi_UpdateStmtType(s);
+        /* One-shot PL/SQL block — exclude from the statement cache. */
         dpiStmt_deleteFromCache(s->stmt);
         CONN_GATE_LEAVE(s->owner);
         Oradpi_ClearBindStoreForStmt(ip, Tcl_GetString(objv[1]));

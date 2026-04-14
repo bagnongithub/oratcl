@@ -4,14 +4,20 @@ Oratcl \- Tcl 9 interface to Oracle via ODPI-C 5.6.4
 
 .SH SYNOPSIS
 .nf
-oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|forceget|timedwait? ?-failovercallback proc?
+oralogon  connect-string ?-pool {min max incr}?
+          ?-homogeneous 0|1?
+          ?-getmode wait|nowait|forceget|timedwait?
+          ?-waittimeout ms? ?-timeout s? ?-maxlifetime s?
+          ?-pinginterval s? ?-pingtimeout ms?
+          ?-stmtcachesize n?
+          ?-failovercallback proc?
 oralogoff logon-handle
 
 oraopen   logon-handle           # open a statement handle
 orastmt   logon-handle           # alias of oraopen
 oraclose  statement-handle
 
-oraparse  statement-handle sql-text
+oraparse  statement-handle ?-novalidate? sql-text
 orasql    statement-handle sql-text ?-parseonly? ?-commit?
 oraplexec statement-handle {pl/sql block} ?-commit?
 oraexec   statement-handle ?-commit?
@@ -68,12 +74,28 @@ Connect using either username/password@connect_identifier, or external auth (lea
 Quoted passwords with backslash escapes are supported: \fBuser/"pass\\"word"@db\fR.
 Options:
 .RS
-.IP "\fB-pool\fR \fImin max incr\fR" 4
-Create/acquire via session pool.
+.IP "\fB-pool\fR \fI{min max incr}\fR" 4
+Create a session pool (or acquire from an existing one — see below) and check out the first
+connection from it. \fImin\fR, \fImax\fR, and \fIincr\fR control the minimum, maximum, and
+increment sizes of the pool.
+Multiple \fBoralogon -pool\fR calls with identical parameters share one underlying session pool
+process-wide; only the first call creates the pool. Different parameters create distinct pools.
 .IP "\fB-homogeneous\fR 0|1" 4
 Homogeneous pool (default 1).
 .IP "\fB-getmode\fR wait|nowait|forceget|timedwait" 4
-Pool get mode.
+Pool get mode. Use \fB-waittimeout\fR with \fBtimedwait\fR to set the wait limit.
+.IP "\fB-waittimeout\fR \fIms\fR" 4
+Maximum time in milliseconds to wait for an available session when \fB-getmode timedwait\fR is active.
+.IP "\fB-timeout\fR \fIs\fR" 4
+Idle session eviction timeout in seconds.
+.IP "\fB-maxlifetime\fR \fIs\fR" 4
+Maximum session lifetime in seconds.
+.IP "\fB-pinginterval\fR \fIs\fR" 4
+Liveness ping interval in seconds. Set to 0 to disable.
+.IP "\fB-pingtimeout\fR \fIms\fR" 4
+Ping timeout in milliseconds.
+.IP "\fB-stmtcachesize\fR \fIn\fR" 4
+Statement cache size for sessions created from this pool.
 .IP "\fB-failovercallback\fR \fIproc\fR" 4
 Register a Tcl proc invoked on recoverable errors (driver-side failover).
 Can also be set later via \fBoraconfig\fR.
@@ -99,6 +121,12 @@ Return a dict with the current connection info. Currently returns \fBautocommit\
 \fBoraopen\fR \fIlogon-handle\fR  (alias: \fBorastmt\fR)
 Open a statement handle.
 .TP
+\fBoraparse\fR \fIstmt\fR ?-novalidate? \fIsql\fR
+Prepare a SQL statement.  By default a server round-trip validates the SQL at parse time,
+so syntax errors are reported immediately.  With \fB-novalidate\fR the prepare is client-side
+only and errors surface at execute time instead; use this on hot paths where the SQL is
+known-good and the round-trip cost is measurable.
+.TP
 \fBorasql\fR \fIstmt\fR \fIsql\fR ?\fB-parseonly\fR? ?\fB-commit\fR?
 Parse and, unless \fB-parseonly\fR, execute once. Clears the per-statement stored-bind cache if text changes.
 .TP
@@ -112,7 +140,9 @@ Prepare and execute a PL/SQL block.
 Bind scalars by name. LOB type is inferred by name suffix (\fB_blob\fR, \fB_clob\fR) and/or value representation.
 .TP
 \fBorabindexec\fR \fIstmt\fR ?\fB-commit\fR? ?\fB-arraydml\fR? \fI:name list\fR ...
-Array DML with name\(->list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().
+Array DML with name\(->list pairs. String values are pinned for the duration of the
+\fIdpiStmt_executeMany\fR call; the lists must not be modified from another thread while the
+call is in progress (in practice this is only relevant to async-dispatched callers).
 
 .SS Fetching
 .TP

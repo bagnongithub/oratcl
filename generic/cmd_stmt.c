@@ -441,7 +441,7 @@ static int Oradpi_ConfigStmt(Tcl_Interp *ip, OradpiStmt *s, Tcl_Size objc, Tcl_O
         case SOPT_FETCHROWS: {
             if (GetRequiredPositiveU32(ip, objv[3], &s->fetchArray, "fetchrows") != TCL_OK)
                 return TCL_ERROR;
-            /* The output variable cache (I2) is sized to the old fetchArray.
+            /* The output variable cache is sized to the old fetchArray.
              * Invalidate it so the next orafetch rebuilds vars with the new
              * maxArraySize; otherwise direct buffer access would overflow. */
             Oradpi_FreeFetchCache(s);
@@ -517,9 +517,28 @@ int Oradpi_Cmd_Close(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
 
 int Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[]) {
     (void)cd;
-    if (objc != 3) {
-        Tcl_WrongNumArgs(ip, 1, objv, "statement-handle sql-text");
+    /* oraparse handle sql                (default: validates SQL with a PARSE_ONLY server round-trip)
+     * oraparse handle -novalidate sql    (client-side prepare only; errors surface at execute time)
+     *
+     * The PARSE_ONLY round-trip catches syntax errors at parse time and is the
+     * default.  Use -novalidate on hot paths where the SQL is known-good and
+     * the per-parse round-trip cost is measurable. */
+    if (objc < 3 || objc > 4) {
+        Tcl_WrongNumArgs(ip, 1, objv, "statement-handle ?-novalidate? sql-text");
         return TCL_ERROR;
+    }
+    int      doValidate = 1; /* default: validate */
+    Tcl_Obj *sqlObj     = NULL;
+    if (objc == 4) {
+        const char *flag = Tcl_GetString(objv[2]);
+        if (strcmp(flag, "-novalidate") != 0) {
+            Tcl_WrongNumArgs(ip, 1, objv, "statement-handle ?-novalidate? sql-text");
+            return TCL_ERROR;
+        }
+        doValidate = 0;
+        sqlObj     = objv[3];
+    } else {
+        sqlObj = objv[2];
     }
     OradpiStmt *s = Oradpi_LookupStmt(ip, objv[1]);
     if (!s)
@@ -527,7 +546,7 @@ int Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     if (!s->owner || !s->owner->conn)
         return Oradpi_SetError(ip, (OradpiBase *)s, -1, "connection closed");
     Tcl_Size    sqlLen = 0;
-    const char *sql    = Tcl_GetStringFromObj(objv[2], &sqlLen);
+    const char *sql    = Tcl_GetStringFromObj(sqlObj, &sqlLen);
     if (sqlLen < 0 || (uint64_t)sqlLen > UINT32_MAX)
         return Oradpi_SetError(ip, (OradpiBase *)s, -1, "SQL text exceeds maximum length");
 
@@ -544,6 +563,7 @@ int Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
         s->stmt = NULL;
     }
     Oradpi_FreeFetchCache(s);
+    s->stmtIsDML = s->stmtIsPLSQL = s->stmtIsQuery = 0;
 
     if (dpiConn_prepareStmt(s->owner->conn, 0, sql, (uint32_t)sqlLen, NULL, 0, &s->stmt) != DPI_SUCCESS) {
         CONN_GATE_LEAVE(s->owner);
@@ -565,15 +585,10 @@ int Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
             }
         }
     }
-    /* Force server-side SQL validation via parse-only execution.
-     * dpiConn_prepareStmt only performs client-side preparation; the server
-     * may not validate SQL syntax until actual execution.  PARSE_ONLY forces
-     * a server round-trip that catches syntax errors immediately—without it,
-     * completely invalid SQL like "SELECTX INVALID" is silently accepted
-     * because the client classifies it as a non-query and the auto-execute
-     * path is never taken.  This also ensures the statement type and
-     * metadata are fully resolved before we inspect them below. */
-    {
+    /* When -novalidate is NOT given (the default), force a server round-trip
+     * that catches syntax errors immediately.  Use -novalidate in hot paths
+     * where the SQL is known-good and the per-parse round-trip is measurable. */
+    if (doValidate) {
         uint32_t parseOnlyCols = 0;
         if (dpiStmt_execute(s->stmt, DPI_MODE_EXEC_PARSE_ONLY, &parseOnlyCols) != DPI_SUCCESS) {
             /* Clean up the server-rejected statement so subsequent oraexec

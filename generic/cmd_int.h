@@ -242,6 +242,10 @@ void               Oradpi_RemoveStmt(Tcl_Interp *ip, OradpiStmt *s);
 void               Oradpi_RemoveLob(Tcl_Interp *ip, OradpiLob *l);
 
 int                Oradpi_DpiContextEnsure(Tcl_Interp *ip);
+/* Pool registry teardown — used by state.c when the last connection
+ * referencing a pool is released.  Decrements the registry refcount;
+ * closes the underlying dpiPool when it reaches zero. */
+void               Oradpi_PoolRelease(dpiPool *pool);
 
 /* Async APIs */
 int                Oradpi_StmtWaitForAsync(OradpiStmt *s, int doCancel, int timeoutMs);

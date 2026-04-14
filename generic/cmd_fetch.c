@@ -34,7 +34,7 @@ typedef struct OradpiFetchColMeta {
     char            *name;
     uint32_t         nameLen;
     int              isChar;
-    /* Type fields needed to create an explicit dpiVar per column (I2). */
+    /* Type fields needed to create an explicit dpiVar per column. */
     dpiOracleTypeNum oracleTypeNum;
     dpiNativeTypeNum defaultNativeTypeNum;
     uint32_t         clientSizeInBytes;
@@ -358,7 +358,7 @@ void Oradpi_FreeFetchCache(OradpiStmt *s) {
         Tcl_Free((char *)s->fetchNumberKeys);
         s->fetchNumberKeys = NULL;
     }
-    /* Release pre-defined output variables (I2). */
+    /* Release pre-defined output variables. */
     if (s->fetchVars) {
         for (uint32_t c = 0; c < n; c++)
             if (s->fetchVars[c])
@@ -516,8 +516,8 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     if (!returnRows && !cmd && !resultVar && maxRows == 0)
         maxRows = 1;
 
-    /* I1: column count is already known after the first fetch — skip the
-     * ODPI call and gate acquire/release on every subsequent invocation. */
+    /* Column count is cached after the first fetch — skip the ODPI call
+     * and gate acquire/release on every subsequent invocation. */
     if (st->fetchCacheNumCols > 0) {
         numCols = st->fetchCacheNumCols;
     } else {
@@ -571,7 +571,7 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
         }
         st->fetchCacheNumCols = numCols;
 
-        /* I2: Build per-column output variable cache to eliminate N
+        /* Build per-column output variable cache to eliminate N
          * dpiStmt_getQueryValue calls per row.  Done before FreeFetchMeta so
          * meta[c] type fields are still valid.  Object columns need a
          * dpiObjectType* unavailable here; any failure falls back to
@@ -622,6 +622,15 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
             Tcl_Free((char *)st->fetchNativeTypes);
             st->fetchNativeTypes = NULL;
         }
+
+        /* Compute LOB flag from the isChar/oracle-type metadata.
+         * Checked once here; the fast path uses it to decide whether the
+         * connection gate is needed per row. */
+        int hasLob = 0;
+        for (uint32_t c = 0; c < numCols && !hasLob; c++)
+            if (meta[c].defaultNativeTypeNum == DPI_NATIVE_TYPE_LOB)
+                hasLob = 1;
+        st->fetchHasLobCols = hasLob;
 
         /* meta name copies served only to build the cache; free them now. */
         FreeFetchMeta(meta, numColsSize);
@@ -701,12 +710,12 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     /* =========================================================================
      * Fetch loop — two paths share the same reentrancy zone:
      *
-     *   Fast path (I2+I3, when st->fetchVarData != NULL):
+     *   Fast path (when st->fetchVarData != NULL):
      *     dpiStmt_fetchRows drains the ODPI buffer in one call per batch;
      *     per-row values come from direct dpiData[] buffer access — zero
      *     dpiStmt_getQueryValue ODPI calls in the hot inner loop.
      *     The gate is acquired once per batch (not per row), reducing lock
-     *     contention against async workers or adopted-connection threads (I6).
+     *     contention against async workers or adopted-connection threads.
      *
      *   Fallback (st->fetchVarData == NULL):
      *     Original dpiStmt_fetch + dpiStmt_getQueryValue per row.
@@ -714,7 +723,7 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
      * ========================================================================= */
     if (st->fetchVarData) {
         /* ------------------------------------------------------------------
-         * FAST PATH (I2 + I3)
+         * FAST PATH
          * ------------------------------------------------------------------ */
         int               moreRows   = 1;
         uint32_t          batchStart = 0, batchCount = 0, batchPos = 0;
@@ -731,7 +740,7 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
                 goto cleanup;
             }
 
-            /* Drain next batch when current one is exhausted (I3).
+            /* Drain the next batch when the current one is exhausted.
              * Pass maxRows (when limited) rather than fetchArray so ODPI-C
              * advances bufferRowIndex by at most the number of rows this call
              * will consume.  Without this, a fetchArray-sized advance discards
@@ -742,9 +751,9 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
                 if (!moreRows)
                     break;
 
-                /* I6: gate is held only for the duration of one batch fetch
+                /* The gate is held only for the duration of one batch fetch
                  * (which may trigger a network round-trip), then released
-                 * before processing any rows — allows async workers and
+                 * before processing any rows.  This allows async workers and
                  * adopted-connection threads to acquire the gate between
                  * batches. */
                 Oradpi_SharedConnGateEnter(fetchShared);
@@ -768,15 +777,21 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
             FreeFetchCells(cells, numColsSize, fetchShared);
             memset(cells, 0, cellBytes);
 
-            /* I2: snapshot directly from pre-defined var buffers — no
-             * dpiStmt_getQueryValue calls.  Gate still needed for LOB
-             * columns (dpiLob_addRef); scalar/bytes columns copy data with
-             * no ODPI calls. */
-            Oradpi_SharedConnGateEnter(fetchShared);
+            /* Snapshot directly from pre-defined var buffers without
+             * dpiStmt_getQueryValue calls.  For scalar-only queries
+             * (fetchHasLobCols == 0), SnapshotCellLocked does only pure
+             * struct copies with no ODPI calls, so the connection gate is
+             * unnecessary.  Skipping it eliminates per-row lock contention
+             * when multiple interpreters share one session.  For LOB queries
+             * the gate is still needed for dpiLob_addRef. */
+            int needGate = st->fetchHasLobCols;
+            if (needGate)
+                Oradpi_SharedConnGateEnter(fetchShared);
             for (uint32_t c = 0; c < numCols; c++) {
                 dpiData *d = &varData[c][rowIdx];
                 if (SnapshotCellLocked(fetchInlineLobs, nativeTypes[c], d, st->fetchIsChar[c], &cells[c], &snapshotWhere, &snapshotMsg) != TCL_OK) {
-                    Oradpi_SharedConnGateLeave(fetchShared);
+                    if (needGate)
+                        Oradpi_SharedConnGateLeave(fetchShared);
                     if (snapshotWhere)
                         code = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)st, snapshotWhere);
                     else {
@@ -786,7 +801,8 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
                     goto cleanup;
                 }
             }
-            Oradpi_SharedConnGateLeave(fetchShared);
+            if (needGate)
+                Oradpi_SharedConnGateLeave(fetchShared);
 
             /* --- Reentrancy zone --- */
             for (uint32_t c = 0; c < numCols; c++) {
@@ -884,7 +900,7 @@ int Oradpi_Cmd_Fetch(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
         }
     } else {
         /* ------------------------------------------------------------------
-         * FALLBACK PATH: original dpiStmt_fetch + dpiStmt_getQueryValue
+         * FALLBACK PATH: dpiStmt_fetch + dpiStmt_getQueryValue per row
          * ------------------------------------------------------------------ */
         for (;;) {
             int         hasRow         = 0;

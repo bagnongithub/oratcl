@@ -124,6 +124,14 @@ typedef struct OradpiStmt {
     uint32_t          numCols;
     int               defined;
 
+    /* Cached statement classification — populated by Oradpi_UpdateStmtType
+     * after every prepare/re-parse and after first successful execute.
+     * Eliminates dpiStmt_getInfo() calls on the hot execute path for
+     * autocommit/batch-error decisions. 0 = not yet classified. */
+    int               stmtIsDML;
+    int               stmtIsPLSQL;
+    int               stmtIsQuery;
+
     /* Fetch metadata cache — populated on first orafetch, invalidated on
      * re-parse.  Eliminates repeated dpiStmt_getQueryInfo round-trips,
      * upper_copy allocations, and Tcl_ObjPrintf calls in tight fetch loops.
@@ -134,13 +142,20 @@ typedef struct OradpiStmt {
     Tcl_Obj         **fetchNumberKeys;   /* [fetchCacheNumCols] "0".."N-1", IncrRefCount'd */
 
     /* Output variable cache — one pre-defined dpiVar per column.
-     * Eliminates N dpiStmt_getQueryValue calls per row (I2); enables
-     * dpiStmt_fetchRows batch drain without per-row ODPI overhead (I3).
+     * Eliminates N dpiStmt_getQueryValue calls per row and enables
+     * dpiStmt_fetchRows batch drain without per-row ODPI overhead.
      * NULL when unavailable (e.g. object-type columns, or after var alloc
      * failure) — fallback to dpiStmt_getQueryValue path is taken instead. */
     dpiVar          **fetchVars;        /* [fetchCacheNumCols] addRef'd dpiVar handles */
     dpiData         **fetchVarData;     /* [fetchCacheNumCols] var buffer pointer arrays */
     dpiNativeTypeNum *fetchNativeTypes; /* [fetchCacheNumCols] native type per column */
+
+    /* Set to 1 when any column in the result set has a LOB native type.
+     * Derived once at cache-build time.  When 0, SnapshotCellLocked in the
+     * fast path does only pure memory copies and no ODPI calls — the gate
+     * can be skipped entirely, removing per-row lock contention for the
+     * common case of scalar-only queries. */
+    int               fetchHasLobCols;
 } OradpiStmt;
 
 typedef struct OradpiLob {

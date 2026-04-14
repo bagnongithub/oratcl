@@ -93,6 +93,7 @@ ul { margin: 10px 0 10px 20px; }
 <li><a href='#oralogon-connect-string-options'>oralogon connect-string ?options?</a></li>
 <li><a href='#oramsg-handle-field'>oramsg handle field</a></li>
 <li><a href='#oraopen-logon-handle--alias-orastmt'>oraopen logon-handle  (alias: orastmt)</a></li>
+<li><a href='#oraparse-stmt-sql'>oraparse stmt ?-novalidate? sql</a></li>
 <li><a href='#oraplexec-stmt-plsql--commit'>oraplexec stmt {pl/sql} ?-commit?</a></li>
 <li><a href='#orarollback-logon-handle'>orarollback logon-handle</a></li>
 <li><a href='#orasql-stmt-sql--parseonly--commit'>orasql stmt sql ?-parseonly? ?-commit?</a></li>
@@ -103,14 +104,20 @@ ul { margin: 10px 0 10px 20px; }
 <h2 id='name'>NAME</h2>
 <p>oratcl &mdash; Tcl 9 interface to Oracle via ODPI-C 5.6.4</p>
 <h2 id='synopsis'>SYNOPSIS</h2>
-<pre><code>oralogon  connect-string ?-pool min max incr? ?-homogeneous 0|1? ?-getmode wait|nowait|forceget|timedwait? ?-failovercallback proc?
+<pre><code>oralogon  connect-string ?-pool {min max incr}?
+          ?-homogeneous 0|1?
+          ?-getmode wait|nowait|forceget|timedwait?
+          ?-waittimeout ms? ?-timeout s? ?-maxlifetime s?
+          ?-pinginterval s? ?-pingtimeout ms?
+          ?-stmtcachesize n?
+          ?-failovercallback proc?
 oralogoff logon-handle
 
 oraopen   logon-handle           # open a statement handle
 orastmt   logon-handle           # alias of oraopen
 oraclose  statement-handle
 
-oraparse  statement-handle sql-text
+oraparse  statement-handle ?-novalidate? sql-text
 orasql    statement-handle sql-text ?-parseonly? ?-commit?
 oraplexec statement-handle {pl/sql block} ?-commit?
 oraexec   statement-handle ?-commit?
@@ -160,9 +167,16 @@ namespace. Use <code>namespace import ::oratcl::*</code> to access the namespace
 <dd><p>Connect using either username/password@connect_identifier, or external auth (leave user/pw empty).
 Quoted passwords with backslash escapes are supported: <code>user/"pass\"word"@db</code>. Options:</p>
 <div class='indent'>
-<p><b>-pool</b> <i>min max incr</i> &mdash; Create/acquire via session pool.</p>
+<p><b>-pool</b> <i>{min max incr}</i> &mdash; Create a session pool (or acquire from an existing one) and check out the first connection.
+Multiple <code>oralogon&nbsp;-pool</code> calls with identical parameters share one underlying session pool process-wide; only the first call creates the pool.</p>
 <p><b>-homogeneous</b> 0|1 &mdash; Homogeneous pool (default 1).</p>
-<p><b>-getmode</b> wait|nowait|forceget|timedwait &mdash; Pool get mode.</p>
+<p><b>-getmode</b> wait|nowait|forceget|timedwait &mdash; Pool get mode. Use <b>-waittimeout</b> together with <code>timedwait</code>.</p>
+<p><b>-waittimeout</b> <i>ms</i> &mdash; Maximum wait in milliseconds for an available session when <code>-getmode timedwait</code> is active.</p>
+<p><b>-timeout</b> <i>s</i> &mdash; Idle session eviction timeout in seconds.</p>
+<p><b>-maxlifetime</b> <i>s</i> &mdash; Maximum session lifetime in seconds.</p>
+<p><b>-pinginterval</b> <i>s</i> &mdash; Liveness ping interval in seconds (0 to disable).</p>
+<p><b>-pingtimeout</b> <i>ms</i> &mdash; Ping timeout in milliseconds.</p>
+<p><b>-stmtcachesize</b> <i>n</i> &mdash; Statement cache size for sessions created from this pool.</p>
 <p><b>-failovercallback</b> <i>proc</i> &mdash; Register a Tcl proc invoked on recoverable errors (driver-side failover). Can also be set later via <b>oraconfig</b>.</p>
 </div>
 <p>Returns a logon-handle (e.g. "oraL1").</p></dd>
@@ -177,6 +191,8 @@ Quoted passwords with backslash escapes are supported: <code>user/"pass\"word"@d
 <dl class='deflist'>
 <dt id='oraopen-logon-handle--alias-orastmt'><b>oraopen</b> <i>logon-handle</i>  (alias: <b>orastmt</b>)</dt>
 <dd><p>Open a statement handle.</p></dd>
+<dt id='oraparse-stmt-sql'><b>oraparse</b> <i>stmt</i> ?<b>-novalidate</b>? <i>sql</i></dt>
+<dd><p>Prepare a SQL statement. By default a server round-trip validates the SQL at parse time, reporting syntax errors immediately. With <b>-novalidate</b> the prepare is client-side only and errors surface at execute time; use this on hot paths where the SQL is known-good and the round-trip cost is measurable.</p></dd>
 <dt id='orasql-stmt-sql--parseonly--commit'><b>orasql</b> <i>stmt</i> <i>sql</i> ?<b>-parseonly</b>? ?<b>-commit</b>?</dt>
 <dd><p>Parse and, unless <b>-parseonly</b>, execute once. Clears the per-statement stored-bind cache if text changes.</p></dd>
 <dt id='oraexec-stmt--commit'><b>oraexec</b> <i>stmt</i> ?<b>-commit</b>?</dt>
@@ -186,7 +202,7 @@ Quoted passwords with backslash escapes are supported: <code>user/"pass\"word"@d
 <dt id='orabind-stmt-name-value'><b>orabind</b> <i>stmt</i> <i>:name value</i> ...</dt>
 <dd><p>Bind scalars by name. LOB type is inferred by name suffix (<code>_blob</code>, <code>_clob</code>) and/or value representation.</p></dd>
 <dt id='orabindexec-stmt--commit--arraydml-name-list'><b>orabindexec</b> <i>stmt</i> ?<b>-commit</b>? ?<b>-arraydml</b>? <i>:name list</i> ...</dt>
-<dd><p>Array DML with name&rarr;list pairs. BYTES elements are copied to private buffers to remain stable until executeMany().</p></dd>
+<dd><p>Array DML with name&rarr;list pairs. String values are pinned for the duration of the <code>executeMany</code> call; the lists must not be modified while the call is in progress.</p></dd>
 </dl>
 <h3 id='fetching'>Fetching</h3>
 <dl class='deflist'>
