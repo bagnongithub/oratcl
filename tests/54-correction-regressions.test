@@ -1,0 +1,426 @@
+# -*-Tcl-*-
+# 54-correction-regressions.test -- regressions found by the general audit
+package require tcltest 2.5
+namespace import ::tcltest::*
+source [file join [file dirname [info script]] 00-setup.test]
+
+# A wrong-password connection string derived at runtime.  No credentials are
+# embedded in this file; the live value comes only from ORATCL_CONNECT.
+proc ::OratclTest::wrong_password_connstr {} {
+    set cs [connstr]
+    set slash [string first / $cs]
+    set at [string last @ $cs]
+    if {$slash <= 0 || $at <= $slash} {
+        return ""
+    }
+    return "[string range $cs 0 $slash]oratcl_definitely_wrong_[pid][string range $cs $at end]"
+}
+
+testConstraint simple_connect [expr {
+    [::OratclTest::wrong_password_connstr] ne ""
+}]
+
+# ---- Fetch cursor integrity and option composition ----
+
+test 54-1.0 {fetch -max across multiple ODPI batches preserves every row} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraconfig $S fetchrows 100
+        orasql $S {SELECT LEVEL AS N FROM dual CONNECT BY LEVEL <= 250}
+        set first [orafetch $S -returnrows -max 150]
+        set rest  [orafetch $S -returnrows]
+        oraclose $S
+        list \
+            [llength $first] [lindex [lindex $first end] 0] \
+            [llength $rest] [lindex [lindex $rest 0] 0] \
+            [lindex [lindex $rest end] 0]
+    }
+} -result {150 150 100 151 250}
+
+test 54-1.1 {-returnrows and -asdict compose independent of option order} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S {SELECT 7 AS A, 9 AS B FROM dual}
+        set rows [orafetch $S -returnrows -asdict]
+        oraclose $S
+        list [llength $rows] [dict get [lindex $rows 0] A] [dict get [lindex $rows 0] B]
+    }
+} -result {1 7 9}
+
+# Run the dangerous cache-mutation scenario in a subprocess.  Before the fix,
+# the callback frees arrays still used by the active fetch and normally aborts.
+test 54-1.2 {same-statement fetch-cache mutation is detected without UAF} \
+    -constraints {have_connect} -body {
+    set script {
+        package require oratcl 9.1
+        set ::L [oralogon $::env(ORATCL_CONNECT)]
+        set ::S [oraopen $::L]
+        oraconfig $::S fetchrows 100
+        orasql $::S {SELECT LEVEL FROM dual CONNECT BY LEVEL <= 40}
+        set ::changed 0
+        set rc [catch {
+            orafetch $::S -datavariable ::row -indexbynumber -command {
+                if {!$::changed} {
+                    set ::changed 1
+                    catch {oraconfig $::S fetchrows 7}
+                }
+            }
+        } msg]
+        catch {oraclose $::S}
+        catch {oralogoff $::L}
+        if {$rc != 1 || ![string match {*changed during callback*} $msg]} {
+            puts stderr "unexpected result: rc=$rc msg=$msg"
+            exit 2
+        }
+        puts OK
+    }
+    set rc [catch {exec [info nameofexecutable] << $script 2>@1} out]
+    list $rc [string trim $out]
+} -result {0 OK}
+
+# ---- Oracle value fidelity ----
+
+test 54-2.0 {NUMBER(38) fetch is exact} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S {SELECT TO_NUMBER('12345678901234567890123456789012345678') FROM dual}
+        set rows [orafetch $S -returnrows]
+        oraclose $S
+        lindex [lindex $rows 0] 0
+    }
+} -result 12345678901234567890123456789012345678
+
+test 54-2.1 {large numeric scalar bind is exact} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(n NUMBER(38))} oratcl9_num]
+        set exact 12345678901234567890123456789012345678
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:n)"
+        orabind $S :n $exact
+        oraexec $S -commit
+        oraclose $S
+        ::OratclTest::query_scalar $L "SELECT TO_CHAR(n, 'FM99999999999999999999999999999999999999') FROM $T"
+    }
+} -result 12345678901234567890123456789012345678
+
+test 54-2.2 {large numeric array bind is exact} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(id NUMBER, n NUMBER(38))} oratcl9_anum]
+        set values {12345678901234567890123456789012345678 98765432109876543210987654321098765432}
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :n)"
+        orabindexec $S -arraydml :id {1 2} :n $values -commit
+        orasql $S "SELECT TO_CHAR(n, 'FM99999999999999999999999999999999999999') FROM $T ORDER BY id"
+        set rows [orafetch $S -returnrows]
+        oraclose $S
+        lmap row $rows {lindex $row 0}
+    }
+} -result {12345678901234567890123456789012345678 98765432109876543210987654321098765432}
+
+test 54-2.3 {ROWID fetch returns its textual value} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(id NUMBER)} oratcl9_rowid]
+        ::OratclTest::run_sql $L "INSERT INTO $T VALUES (1)"
+        set rid [::OratclTest::query_scalar $L "SELECT ROWID FROM $T"]
+        expr {$rid ne "" && [regexp {^[A-Za-z0-9+/]+$} $rid]}
+    }
+} -result 1
+
+test 54-2.4 {interval native types are materialized} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S {SELECT INTERVAL '1 02:03:04.123456789' DAY TO SECOND(9),
+                         INTERVAL '2-03' YEAR TO MONTH FROM dual}
+        set row [lindex [orafetch $S -returnrows] 0]
+        oraclose $S
+        set row
+    }
+} -result {{1 02:03:04.123456789} 2-03}
+
+test 54-2.5 {timestamp preserves nanoseconds and time-zone offset} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        orasql $S {SELECT TIMESTAMP '2024-01-02 03:04:05.123456789',
+                         TO_TIMESTAMP_TZ('2024-01-02 03:04:05.123456789 +05:30',
+                                         'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')
+                    FROM dual}
+        set row [lindex [orafetch $S -returnrows] 0]
+        oraclose $S
+        set row
+    }
+} -result {2024-01-02T03:04:05.123456789 2024-01-02T03:04:05.123456789+05:30}
+
+# A status-only LOB fetch must not manufacture an unreachable oraB handle.
+test 54-2.6 {status-only LOB fetch creates no hidden handle} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L inlineLobs 0
+        set S1 [oraopen $L]
+        regexp {(\d+)$} $S1 -> n1
+        orasql $S1 {SELECT TO_CLOB('x') FROM dual}
+        orafetch $S1
+        oraclose $S1
+        set S2 [oraopen $L]
+        regexp {(\d+)$} $S2 -> n2
+        oraclose $S2
+        expr {$n2 - $n1}
+    }
+} -result 1
+
+test 54-2.7 {large hexadecimal Tcl integer bind is exact} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(n NUMBER(38))} oratcl9_hexnum]
+        set value 0xFFFFFFFFFFFFFFFFFFFFFFFF
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:n)"
+        orabind $S :n $value
+        oraexec $S -commit
+        oraclose $S
+        ::OratclTest::query_scalar $L \
+            "SELECT TO_CHAR(n, 'FM99999999999999999999999999999999999999') FROM $T"
+    }
+} -result 79228162514264337593543950335
+
+test 54-2.8 {large hexadecimal Tcl integers in array DML are exact} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(id NUMBER, n NUMBER(38))} oratcl9_ahex]
+        set values {0xFFFFFFFFFFFFFFFFFFFFFFFF 0x10000000000000000}
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :n)"
+        orabindexec $S -arraydml :id {1 2} :n $values -commit
+        orasql $S "SELECT TO_CHAR(n, 'FM99999999999999999999999999999999999999') FROM $T ORDER BY id"
+        set rows [orafetch $S -returnrows]
+        oraclose $S
+        lmap row $rows {lindex $row 0}
+    }
+} -result {79228162514264337593543950335 18446744073709551616}
+
+# ---- Error preservation and message-area lifecycle ----
+
+test 54-3.0 {parse failure records the failing ODPI call before cleanup} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        catch {oraparse $S {SELECTX invalid syntax}} msg
+        set result [list [regexp {ORA-[0-9]+} $msg] [oramsg $S fn] [expr {[oramsg $S rc] != 0}]]
+        oraclose $S
+        set result
+    }
+} -result {1 dpiStmt_execute 1}
+
+test 54-3.1 {describe failure records the failing ODPI call before cleanup} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        catch {oradesc $L ORATCL9_NO_SUCH_OBJECT_54} msg
+        list [regexp {ORA-[0-9]+} $msg] [oramsg $L fn] [expr {[oramsg $L rc] != 0}]
+    }
+} -result {1 dpiStmt_execute 1}
+
+test 54-3.2 {scalar bind execution preserves unique-constraint error} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(id NUMBER PRIMARY KEY, payload CLOB)} oratcl9_berr]
+        ::OratclTest::run_sql $L "INSERT INTO $T VALUES (1, 'original')"
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id, :payload_clob)"
+        catch {orabindexec $S :id 1 :payload_clob [string repeat x 5000]} msg
+        set result [list [regexp {ORA-00001} $msg] [oramsg $S fn]]
+        oraclose $S
+        set result
+    }
+} -result {1 dpiStmt_execute}
+
+test 54-3.3 {batch errors populate oramsg} -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(id NUMBER PRIMARY KEY)} oratcl9_batcherr]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id)"
+        catch {orabindexec $S -arraydml :id {1 1}} msg
+        set result [list [expr {[oramsg $S rc] != 0}] [regexp {ORA-00001} [oramsg $S error]]]
+        oraclose $S
+        set result
+    }
+} -result {1 1}
+
+test 54-3.4 {successful operation clears stale oramsg error status} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        catch {orasql $S {SELECT * FROM ORATCL9_NO_SUCH_TABLE_54}}
+        set failed [expr {[oramsg $S rc] != 0}]
+        orasql $S {SELECT 1 FROM dual}
+        set result [list $failed [oramsg $S rc] [oramsg $S ocicode] [oramsg $S error]]
+        oraclose $S
+        set result
+    }
+} -result {1 0 0 {}}
+
+test 54-3.5 {client error clears stale extended ODPI fields} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        catch {oraparse $S {SELECTX invalid syntax}}
+        catch {oraexec $S}
+        set result [list [oramsg $S fn] [oramsg $S action] [oramsg $S sqlstate] \
+                             [oramsg $S warning] [oramsg $S offset] [oramsg $S peo]]
+        oraclose $S
+        set result
+    }
+} -result {Oratcl {} {} 0 0 0}
+
+test 54-3.6 {successful transaction clears stale connection error status} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        catch {oradesc $L ORATCL9_NO_SUCH_OBJECT_54}
+        set failed [expr {[oramsg $L rc] != 0}]
+        oracommit $L
+        list $failed [oramsg $L rc] [oramsg $L error]
+    }
+} -result {1 0 {}}
+
+# ---- Pool identity and shared adopted-connection policy ----
+
+test 54-4.0 {homogeneous pool does not accept a different password by alias} \
+    -constraints {have_connect simple_connect} -body {
+    package require oratcl 9.1
+    set cs [::OratclTest::connstr]
+    set bad [::OratclTest::wrong_password_connstr]
+    set L1 [oralogon $cs -pool {0 2 1} -getmode wait -timeout 541]
+    set rc [catch {set L2 [oralogon $bad -pool {0 2 1} -getmode wait -timeout 541]} msg]
+    if {[info exists L2]} {catch {oralogoff $L2}}
+    catch {oralogoff $L1}
+    list $rc [regexp {ORA-01017} $msg]
+} -result {1 1}
+
+test 54-4.1 {different pool get modes do not alias} -constraints {have_connect} -body {
+    package require oratcl 9.1
+    set cs [::OratclTest::connstr]
+    set L1 [oralogon $cs -pool {1 1 1} -getmode nowait -timeout 542]
+    set rc [catch {set L2 [oralogon $cs -pool {1 1 1} -getmode forceget -timeout 542]}]
+    if {[info exists L2]} {catch {oralogoff $L2}}
+    catch {oralogoff $L1}
+    set rc
+} -result 0
+
+test 54-4.2 {heterogeneous pool authenticates the checked-out session} \
+    -constraints {have_connect} -body {
+    package require oratcl 9.1
+    set L [oralogon [::OratclTest::connstr] -pool {0 2 1} \
+               -homogeneous 0 -getmode wait -timeout 543]
+    set S [oraopen $L]
+    orasql $S {SELECT 1 FROM dual}
+    set value [lindex [lindex [orafetch $S -returnrows] 0] 0]
+    oraclose $S
+    oralogoff $L
+    set value
+} -result 1
+
+test 54-4.3 {existing adopter observes current shared behavior} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set child [interp create]
+        interp eval $child {package require oratcl 9.1}
+        interp eval $child [list set L $L]
+        interp eval $child {set S [oraopen $L]; oraclose $S}
+        oraconfig $L fetcharraysize 37
+        oraautocommit $L 1
+        set result [interp eval $child {
+            list [oraconfig $L fetcharraysize] [dict get [orainfo $L] autocommit]
+        }]
+        interp eval $child {oralogoff $L}
+        interp delete $child
+        set result
+    }
+} -result {37 1}
+
+test 54-4.4 {stale adopter update cannot overwrite another policy field} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set stale [interp create]
+        interp eval $stale {package require oratcl 9.1}
+        interp eval $stale [list set L $L]
+        interp eval $stale {set S [oraopen $L]; oraclose $S}
+
+        oraconfig $L fetcharraysize 43
+        interp eval $stale {oraconfig $L inlineLobs 1}
+
+        set fresh [interp create]
+        interp eval $fresh {package require oratcl 9.1}
+        interp eval $fresh [list set L $L]
+        set result [interp eval $fresh {
+            set S [oraopen $L]; oraclose $S
+            list [oraconfig $L fetcharraysize] [oraconfig $L inlineLobs]
+        }]
+        interp eval $fresh {oralogoff $L}
+        interp eval $stale {oralogoff $L}
+        interp delete $fresh
+        interp delete $stale
+        set result
+    }
+} -result {43 1}
+
+test 54-4.5 {invalid failover factors are rejected without mutation} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        oraconfig $L foBackoffFactor 1.5
+        set negative [catch {oraconfig $L foBackoffFactor -1}]
+        set nan      [catch {oraconfig $L foBackoffFactor NaN}]
+        list $negative $nan [oraconfig $L foBackoffFactor]
+    }
+} -result {1 1 1.5}
+
+# ---- Strict argument consumption ----
+
+test 54-5.0 {orabind rejects a trailing unmatched argument} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set S [oraopen $L]
+        oraparse $S {SELECT :x FROM dual}
+        set rc [catch {orabind $S :x 1 trailing}]
+        oraclose $S
+        set rc
+    }
+} -result 1
+
+test 54-5.1 {scalar orabindexec rejects trailing garbage before DML} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(id NUMBER)} oratcl9_args]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id)"
+        set rc [catch {orabindexec $S :id 1 trailing}]
+        oraclose $S
+        list $rc [::OratclTest::count_rows $L $T]
+    }
+} -result {1 0}
+
+test 54-5.2 {array orabindexec rejects trailing garbage before DML} \
+    -constraints {have_connect} -body {
+    ::OratclTest::with_connection L {
+        set T [::OratclTest::mk_table $L {(id NUMBER)} oratcl9_aargs]
+        set S [oraopen $L]
+        oraparse $S "INSERT INTO $T VALUES (:id)"
+        set rc [catch {orabindexec $S -arraydml :id {1 2} trailing}]
+        oraclose $S
+        list $rc [::OratclTest::count_rows $L $T]
+    }
+} -result {1 0}
+
+test 54-5.3 {quoted connect string rejects bytes after closing quote} -body {
+    package require oratcl 9.1
+    set rc [catch {oralogon {testuser/"password"trailing}} msg]
+    list $rc [string match {*malformed*} $msg]
+} -result {1 1}
+
+test 54-5.4 {external-auth connect string rejects ignored trailing bytes} -body {
+    package require oratcl 9.1
+    set rc [catch {oralogon {/ignored@nonexistent_db_12345}} msg]
+    list $rc [string match {*malformed*} $msg]
+} -result {1 1}
+
+cleanupTests

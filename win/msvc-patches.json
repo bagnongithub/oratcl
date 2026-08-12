@@ -1,0 +1,12 @@
+[
+  {
+    "path": "generic/async.c",
+    "find": "static void PoolThreadProc(void *cd) {",
+    "replace": "static Tcl_ThreadCreateType PoolThreadProc(void *cd) {"
+  },
+  {
+    "path": "generic/async.c",
+    "find": "    Tcl_MutexUnlock(&gPool.queueMutex);\n}\n\nstatic void PoolEnsure(void) {",
+    "replace": "    Tcl_MutexUnlock(&gPool.queueMutex);\n    TCL_THREAD_CREATE_RETURN;\n}\n\nstatic void PoolEnsure(void) {"
+  }
+]
