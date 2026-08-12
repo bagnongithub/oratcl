@@ -254,7 +254,7 @@ static void AsyncRemove(const char *key) {
  * Thread pool
  * ========================================================================= */
 
-static void PoolThreadProc(void *cd) {
+static Tcl_ThreadCreateType PoolThreadProc(void *cd) {
     (void)cd;
     for (;;) {
         Tcl_MutexLock(&gPool.queueMutex);
@@ -285,6 +285,7 @@ static void PoolThreadProc(void *cd) {
         gPool.liveWorkers--;
     Tcl_ConditionNotify(&gPool.exitCond);
     Tcl_MutexUnlock(&gPool.queueMutex);
+    TCL_THREAD_CREATE_RETURN;
 }
 
 static void PoolEnsure(void) {
@@ -365,6 +366,7 @@ static void PoolEnqueue(const char *key) {
 
 static void PoolExitHandler(void *unused) {
     Tcl_Size nThreads = 0;
+    int      remaining = 0;
 
     (void)unused;
     Tcl_MutexLock(&gPoolInitMutex);
@@ -449,7 +451,7 @@ static void PoolExitHandler(void *unused) {
         if (now.sec > deadline.sec || (now.sec == deadline.sec && now.usec >= deadline.usec))
             break; /* timeout — stuck workers will be killed by process exit */
     }
-    int remaining = gPool.liveWorkers;
+    remaining = gPool.liveWorkers;
     Tcl_MutexUnlock(&gPool.queueMutex);
 
     /* Only attempt Tcl_JoinThread for workers that have actually exited.
@@ -558,7 +560,7 @@ static void AsyncWorkerBody(const char *key) {
     }
     Oradpi_SharedConnGateLeave(ae->shared);
 
-    /* Execute with retry/backoff when failover policy is configured.
+    /* Execute queries with retry/backoff when failover policy is configured.
      * maxAttempts/backoffMs/backoffFact/errClasses are already snapshotted above. */
 
     int          execRc = DPI_FAILURE;
@@ -569,7 +571,9 @@ static void AsyncWorkerBody(const char *key) {
     uint32_t attempt = 0;
     /* overflow-safe totalTries computation */
     uint32_t totalTries;
-    if (maxAttempts > 0 && errClasses)
+    /* Never replay DML or PL/SQL after an ambiguous connection failure.
+     * Only read-only query statements are eligible for automatic retry. */
+    if (info.isQuery && maxAttempts > 0 && errClasses)
         totalTries = (maxAttempts >= UINT32_MAX) ? UINT32_MAX : maxAttempts + 1;
     else
         totalTries = 1;
@@ -745,11 +749,12 @@ int Oradpi_Cmd_ExecAsync(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const
     }
 
     if (dpiStmt_addRef(s->stmt) != DPI_SUCCESS) {
+        int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_addRef");
         dpiConn_release(s->owner->conn);
         Tcl_Free(stmtKeyCopy);
         AsyncRemove(key);
         AsyncRelease(ae);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_addRef");
+        return errorCode;
     }
 
     Oradpi_SharedConnAddRef(s->owner->shared);
@@ -908,6 +913,7 @@ int Oradpi_Cmd_WaitAsync(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const
     /* Record rows affected on async success so "oramsg $S rows"
      * returns the correct count after orawaitasync completes. */
     if (rc == 0 && s->stmt && s->owner) {
+        Oradpi_ResetMsg((OradpiBase *)s);
         CONN_GATE_ENTER(s->owner);
         uint64_t rows = 0;
         if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)

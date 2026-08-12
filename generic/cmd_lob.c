@@ -69,6 +69,7 @@ int Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[
         Oradpi_SharedConnGateLeave(l->shared);
         if (ok != DPI_SUCCESS)
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)l, "dpiLob_getSize");
+        Oradpi_ResetMsg((OradpiBase *)l);
         Tcl_SetObjResult(ip, Tcl_NewWideIntObj((Tcl_WideInt)sz));
         return TCL_OK;
     }
@@ -108,6 +109,7 @@ int Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[
                 amount = lobSize - offset + 1;
         }
         if (amount == 0) {
+            Oradpi_ResetMsg((OradpiBase *)l);
             Tcl_SetObjResult(ip, Tcl_NewObj());
             return TCL_OK;
         }
@@ -139,6 +141,7 @@ int Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[
             Tcl_Free(buf);
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)l, "dpiLob_readBytes");
         }
+        Oradpi_ResetMsg((OradpiBase *)l);
         Tcl_SetObjResult(ip, Tcl_NewByteArrayObj((const unsigned char *)buf, (Tcl_Size)gotBytes));
         Tcl_Free(buf);
         return TCL_OK;
@@ -180,6 +183,7 @@ int Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[
             if (wok != DPI_SUCCESS)
                 return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)l, "dpiLob_writeBytes");
         }
+        Oradpi_ResetMsg((OradpiBase *)l);
         Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
         return TCL_OK;
     }
@@ -198,6 +202,7 @@ int Oradpi_Cmd_Lob(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv[
         Oradpi_SharedConnGateLeave(l->shared);
         if (tok != DPI_SUCCESS)
             return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)l, "dpiLob_trim");
+        Oradpi_ResetMsg((OradpiBase *)l);
         Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
         return TCL_OK;
     }

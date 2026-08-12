@@ -120,6 +120,7 @@ int Oradpi_Cmd_Cols(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv
     CONN_GATE_LEAVE(s->owner);
 
     if (ncols == 0) {
+        Oradpi_ResetMsg((OradpiBase *)s);
         Tcl_SetObjResult(ip, Tcl_NewListObj(0, NULL));
         return TCL_OK;
     }
@@ -152,6 +153,7 @@ int Oradpi_Cmd_Cols(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv
         Tcl_DecrRefCount(entry);
         goto cleanup;
     }
+    Oradpi_ResetMsg((OradpiBase *)s);
     Tcl_SetObjResult(ip, res);
 
 cleanup:
@@ -230,10 +232,11 @@ int Oradpi_Cmd_Desc(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv
     }
     Tcl_DStringFree(&ds);
     if (dpiStmt_execute(stmt, DPI_MODE_EXEC_DEFAULT, &ncols) != DPI_SUCCESS) {
-        CONN_GATE_LEAVE(co);
+        int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiStmt_execute");
         dpiStmt_close(stmt, NULL, 0);
         dpiStmt_release(stmt);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiStmt_execute");
+        CONN_GATE_LEAVE(co);
+        return errorCode;
     }
     CONN_GATE_LEAVE(co);
 
@@ -264,6 +267,7 @@ int Oradpi_Cmd_Desc(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const objv
         Tcl_DecrRefCount(entry);
         goto cleanup;
     }
+    Oradpi_ResetMsg((OradpiBase *)co);
     Tcl_SetObjResult(ip, res);
 
 cleanup:

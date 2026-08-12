@@ -149,13 +149,16 @@ typedef struct OradpiStmt {
     dpiVar          **fetchVars;        /* [fetchCacheNumCols] addRef'd dpiVar handles */
     dpiData         **fetchVarData;     /* [fetchCacheNumCols] var buffer pointer arrays */
     dpiNativeTypeNum *fetchNativeTypes; /* [fetchCacheNumCols] native type per column */
+    dpiOracleTypeNum *fetchOracleTypes; /* [fetchCacheNumCols] Oracle type per column */
 
-    /* Set to 1 when any column in the result set has a LOB native type.
-     * Derived once at cache-build time.  When 0, SnapshotCellLocked in the
-     * fast path does only pure memory copies and no ODPI calls — the gate
-     * can be skipped entirely, removing per-row lock contention for the
-     * common case of scalar-only queries. */
-    int               fetchHasLobCols;
+    /* Incremented whenever the cache is invalidated.  Active fetches snapshot
+     * this value so a callback that reparses or reconfigures the same statement
+     * is detected before any freed cache pointer is used again. */
+    uint64_t          fetchCacheGeneration;
+
+    /* Set when snapshotting any column calls ODPI (currently LOB and ROWID).
+     * When 0, the fast path does pure buffer copies without a per-row gate. */
+    int               fetchNeedsSnapshotGate;
 } OradpiStmt;
 
 typedef struct OradpiLob {
@@ -189,7 +192,8 @@ void       Oradpi_SharedConnGateEnter(GlobalConnRec *gr);
 int        Oradpi_SharedConnGateEnterTimed(GlobalConnRec *gr, int timeoutMs);
 void       Oradpi_SharedConnGateLeave(GlobalConnRec *gr);
 void       Oradpi_SharedConnBreak(GlobalConnRec *gr, dpiConn *conn);
-void       Oradpi_SharedConnSyncBehavior(OradpiConn *co);
+void       Oradpi_SharedConnSyncBehavior(OradpiConn *co, uint32_t mask);
+void       Oradpi_SharedConnRefreshBehavior(OradpiConn *co);
 void      *Oradpi_ConnGateToken(OradpiConn *co);
 
 #endif /* ORATCL_ODPI_STATE_H */

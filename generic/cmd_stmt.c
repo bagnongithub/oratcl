@@ -15,6 +15,7 @@
 
 #include <inttypes.h>
 #include <limits.h>
+#include <math.h>
 #include <string.h>
 
 #include "cmd_int.h"
@@ -248,6 +249,7 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
         Tcl_WrongNumArgs(ip, 2, objv, "?-name value ...?");
         return TCL_ERROR;
     }
+    uint32_t behaviorMask = 0;
     for (Tcl_Size i = 2; i < objc; i += 2) {
         int idx;
         if (GetOptIndex(ip, objv[i], connOptNames, "option", &idx) != TCL_OK)
@@ -255,39 +257,45 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
 
         switch ((enum ConnOptIdx)idx) {
         case COPT_STMTCACHE: {
-            if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->stmtCacheSize, "stmtcachesize") != TCL_OK)
+            uint32_t newSize = 0;
+            if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &newSize, "stmtcachesize") != TCL_OK)
                 return TCL_ERROR;
             if (co->conn) {
                 CONN_GATE_ENTER(co);
-                if (dpiConn_setStmtCacheSize(co->conn, co->stmtCacheSize) != DPI_SUCCESS) {
+                if (dpiConn_setStmtCacheSize(co->conn, newSize) != DPI_SUCCESS) {
                     CONN_GATE_LEAVE(co);
                     return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_setStmtCacheSize");
                 }
                 CONN_GATE_LEAVE(co);
             }
+            co->stmtCacheSize = newSize;
             break;
         }
         case COPT_FETCHARRAY: {
             if (GetRequiredPositiveU32(ip, objv[i + 1], &co->fetchArraySize, "fetcharraysize") != TCL_OK)
                 return TCL_ERROR;
+            behaviorMask |= ORADPI_BEHAVIOR_FETCHARRAY;
             break;
         }
         case COPT_PREFETCHROWS: {
             if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->prefetchRows, "prefetchrows") != TCL_OK)
                 return TCL_ERROR;
+            behaviorMask |= ORADPI_BEHAVIOR_PREFETCH;
             break;
         }
         case COPT_CALLTIMEOUT: {
-            if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->callTimeout, "calltimeout") != TCL_OK)
+            uint32_t newTimeout = 0;
+            if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &newTimeout, "calltimeout") != TCL_OK)
                 return TCL_ERROR;
             if (co->conn) {
                 CONN_GATE_ENTER(co);
-                if (dpiConn_setCallTimeout(co->conn, co->callTimeout) != DPI_SUCCESS) {
+                if (dpiConn_setCallTimeout(co->conn, newTimeout) != DPI_SUCCESS) {
                     CONN_GATE_LEAVE(co);
                     return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_setCallTimeout");
                 }
                 CONN_GATE_LEAVE(co);
             }
+            co->callTimeout = newTimeout;
             break;
         }
         case COPT_INLINELOBS: {
@@ -295,6 +303,7 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
             if (Tcl_GetBooleanFromObj(ip, objv[i + 1], &v) != TCL_OK)
                 return TCL_ERROR;
             co->inlineLobs = v ? 1 : 0;
+            behaviorMask |= ORADPI_BEHAVIOR_INLINELOBS;
             break;
         }
         case COPT_FOMAXATT: {
@@ -314,18 +323,25 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
             }
 #undef ORADPI_FOMAXATTEMPTS_MAX
             co->foMaxAttempts = v;
+            behaviorMask |= ORADPI_BEHAVIOR_FOMAXATTEMPTS;
             break;
         }
         case COPT_FOBACKOFF: {
             if (Oradpi_GetUInt32FromObj(ip, objv[i + 1], &co->foBackoffMs, "foBackoffMs") != TCL_OK)
                 return TCL_ERROR;
+            behaviorMask |= ORADPI_BEHAVIOR_FOBACKOFFMS;
             break;
         }
         case COPT_FOFACTOR: {
             double d = 0.0;
             if (Tcl_GetDoubleFromObj(ip, objv[i + 1], &d) != TCL_OK)
                 return TCL_ERROR;
+            if (!isfinite(d) || d < 0.0) {
+                Tcl_SetObjResult(ip, Tcl_NewStringObj("foBackoffFactor must be a finite value >= 0", -1));
+                return TCL_ERROR;
+            }
             co->foBackoffFactor = d;
+            behaviorMask |= ORADPI_BEHAVIOR_FOBACKOFFFACTOR;
             break;
         }
         case COPT_FOCLASSES: {
@@ -353,6 +369,7 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
                 Tcl_DecrRefCount(el);
             }
             co->foErrorClasses = m;
+            behaviorMask |= ORADPI_BEHAVIOR_FOERRORCLASSES;
             break;
         }
         case COPT_FODEBOUNCE: {
@@ -368,6 +385,7 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
                 return TCL_ERROR;
             }
             co->foDebounceMs = v;
+            behaviorMask |= ORADPI_BEHAVIOR_FODEBOUNCEMS;
             break;
         }
         case COPT_FOCALLBACK: {
@@ -386,9 +404,9 @@ static int Oradpi_ConfigConn(Tcl_Interp *ip, OradpiConn *co, Tcl_Size objc, Tcl_
         }
         }
     }
-    /* After any config change, sync the behavioral policy snapshot
-     * to the shared record so adopters inherit updated values. */
-    Oradpi_SharedConnSyncBehavior(co);
+    /* Publish only the fields changed by this call.  Other fields may have
+     * been updated through a different adopted wrapper in the meantime. */
+    Oradpi_SharedConnSyncBehavior(co, behaviorMask);
     Tcl_Obj *tmpv[2] = {objv[0], objv[1]};
     return Oradpi_ConfigConn(ip, co, 2, tmpv);
 }
@@ -439,20 +457,22 @@ static int Oradpi_ConfigStmt(Tcl_Interp *ip, OradpiStmt *s, Tcl_Size objc, Tcl_O
 
         switch ((enum StmtOptIdx)idx) {
         case SOPT_FETCHROWS: {
-            if (GetRequiredPositiveU32(ip, objv[3], &s->fetchArray, "fetchrows") != TCL_OK)
+            uint32_t newFetchArray = 0;
+            if (GetRequiredPositiveU32(ip, objv[3], &newFetchArray, "fetchrows") != TCL_OK)
                 return TCL_ERROR;
-            /* The output variable cache is sized to the old fetchArray.
-             * Invalidate it so the next orafetch rebuilds vars with the new
-             * maxArraySize; otherwise direct buffer access would overflow. */
-            Oradpi_FreeFetchCache(s);
             if (s->stmt) {
                 CONN_GATE_ENTER(s->owner);
-                if (dpiStmt_setFetchArraySize(s->stmt, s->fetchArray) != DPI_SUCCESS) {
+                if (dpiStmt_setFetchArraySize(s->stmt, newFetchArray) != DPI_SUCCESS) {
                     CONN_GATE_LEAVE(s->owner);
                     return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_setFetchArraySize");
                 }
                 CONN_GATE_LEAVE(s->owner);
             }
+            s->fetchArray = newFetchArray;
+            /* The output variable cache is sized to the old fetchArray.
+             * Invalidate it only after ODPI accepts the new size, so a failed
+             * setter leaves both configuration and cache intact. */
+            Oradpi_FreeFetchCache(s);
             Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(s->fetchArray));
             return TCL_OK;
         }
@@ -460,7 +480,6 @@ static int Oradpi_ConfigStmt(Tcl_Interp *ip, OradpiStmt *s, Tcl_Size objc, Tcl_O
             uint32_t pr = 0;
             if (Oradpi_GetUInt32FromObj(ip, objv[3], &pr, "prefetchrows") != TCL_OK)
                 return TCL_ERROR;
-            s->prefetchRows = pr;
             if (s->stmt) {
                 CONN_GATE_ENTER(s->owner);
                 if (dpiStmt_setPrefetchRows(s->stmt, pr) != DPI_SUCCESS) {
@@ -469,6 +488,7 @@ static int Oradpi_ConfigStmt(Tcl_Interp *ip, OradpiStmt *s, Tcl_Size objc, Tcl_O
                 }
                 CONN_GATE_LEAVE(s->owner);
             }
+            s->prefetchRows = pr;
             /* Note: only affects this statement, not the connection default */
             Tcl_SetObjResult(ip, Oradpi_NewUInt32Obj(pr));
             return TCL_OK;
@@ -591,6 +611,9 @@ int Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     if (doValidate) {
         uint32_t parseOnlyCols = 0;
         if (dpiStmt_execute(s->stmt, DPI_MODE_EXEC_PARSE_ONLY, &parseOnlyCols) != DPI_SUCCESS) {
+            /* Capture and publish the failing call before close/release: every
+             * ODPI public cleanup call resets the thread-local error buffer. */
+            int errorCode = SetStmtAndOwnerODPIError(ip, s, "dpiStmt_execute(PARSE_ONLY)");
             /* Clean up the server-rejected statement so subsequent oraexec
              * gets a clear "not prepared" error instead of retrying the
              * rejected SQL with a confusing duplicate error. */
@@ -598,13 +621,14 @@ int Oradpi_Cmd_Parse(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
             dpiStmt_release(s->stmt);
             s->stmt = NULL;
             CONN_GATE_LEAVE(s->owner);
-            return SetStmtAndOwnerODPIError(ip, s, "dpiStmt_execute(PARSE_ONLY)");
+            return errorCode;
         }
     }
 
     Oradpi_UpdateStmtType(s);
     CONN_GATE_LEAVE(s->owner);
 
+    Oradpi_ResetMsg((OradpiBase *)s);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }

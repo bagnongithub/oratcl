@@ -105,12 +105,25 @@ int                Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int rc, const 
 int                Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *fn);
 int                Oradpi_SetErrorFromODPIInfo(Tcl_Interp *ip, OradpiBase *h, const char *where, const dpiErrorInfo *ei);
 void               Oradpi_RecordRows(OradpiBase *h, uint64_t rows);
+void               Oradpi_ResetMsg(OradpiBase *h);
 void               Oradpi_UpdateStmtType(OradpiStmt *s);
 void               Oradpi_FreeMsg(OradpiMsg *m);
 
 extern dpiContext *Oradpi_GlobalDpiContext;
 dpiContext        *Oradpi_GetDpiContext(void);
 int                Oradpi_CaptureODPIError(dpiErrorInfo *ei);
+
+/* Behavioral fields shared by all wrappers that adopt the same dpiConn. */
+#define ORADPI_BEHAVIOR_AUTOCOMMIT     0x001u
+#define ORADPI_BEHAVIOR_FETCHARRAY     0x002u
+#define ORADPI_BEHAVIOR_PREFETCH       0x004u
+#define ORADPI_BEHAVIOR_INLINELOBS     0x008u
+#define ORADPI_BEHAVIOR_FOMAXATTEMPTS  0x010u
+#define ORADPI_BEHAVIOR_FOBACKOFFMS    0x020u
+#define ORADPI_BEHAVIOR_FOBACKOFFFACTOR 0x040u
+#define ORADPI_BEHAVIOR_FOERRORCLASSES 0x080u
+#define ORADPI_BEHAVIOR_FODEBOUNCEMS   0x100u
+#define ORADPI_BEHAVIOR_ALL            0x1ffu
 
 #define ORATCL_NAMESPACE "::oratcl"
 

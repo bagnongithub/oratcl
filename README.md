@@ -6,10 +6,11 @@ A Tcl 9 extension that re‑implements the classic Oratcl API on top of **ODPI�
 
 - **Thread‑pool async**: `oraexecasync` / `orawaitasync` / `orabreak` with persistent worker threads, reference‑counted entries, and orphan‑safe teardown.
 - **Cross‑interpreter connection adoption**: share a physical Oracle session across Tcl interpreters with refcounted shared records, per‑connection operation gates, and behavioral policy sync.
-- **Session pooling**: `oralogon -pool {min max incr}` with homogeneous/heterogeneous mode, configurable get‑mode, and tuning knobs (`-waittimeout`, `-timeout`, `-maxlifetime`, `-pinginterval`, `-pingtimeout`, `-stmtcachesize`). Multiple `oralogon -pool` calls with identical parameters share one underlying session pool process‑wide.
+- **Session pooling**: `oralogon -pool {min max incr}` with homogeneous/heterogeneous mode, configurable get‑mode, and tuning knobs (`-waittimeout`, `-timeout`, `-maxlifetime`, `-pinginterval`, `-pingtimeout`, `-stmtcachesize`). Calls share an underlying pool only when credentials, connect identifier, mode, sizing, and tuning all match.
 - **LOB helpers**: `oralob size|read|write|trim|close`, with `inlineLobs` mode for automatic materialization during fetch.
-- **Driver‑side failover**: configurable retry/backoff policy (`foMaxAttempts`, `foBackoffMs`, `foBackoffFactor`, `foErrorClasses`) with debounced failover callbacks.
-- **Rich diagnostics**: `oramsg` exposes `fn`, `action`, `sqlstate`, `recoverable`, `warning`, `offset` via `all`/`allx`.
+- **Driver‑side failover**: configurable retry/backoff policy (`foMaxAttempts`, `foBackoffMs`, `foBackoffFactor`, `foErrorClasses`) with debounced failover callbacks. Only queries are replayed automatically; DML and PL/SQL are never retried after an ambiguous connection failure.
+- **Exact Oracle values**: `NUMBER` values retain their decimal precision; ROWIDs, nanosecond timestamps, time-zone offsets, and both interval types are materialized explicitly.
+- **Rich diagnostics**: `oramsg` exposes `fn`, `action`, `sqlstate`, `recoverable`, `warning`, `offset` via `all`/`allx`; each successful database operation clears stale error fields.
 - **Namespace support**: all commands available under `::oratcl::*` for `namespace import`.
 - **Integer safety**: all narrowing conversions use checked helpers with descriptive errors.
 

@@ -56,8 +56,10 @@ Tcl_Obj                *Oradpi_NewHandleName(Tcl_Interp *ip, const char *prefix)
 }
 
 void Oradpi_RecordRows(OradpiBase *h, uint64_t rows) {
-    if (h)
+    if (h) {
+        Oradpi_ResetMsg(h);
         h->msg.rows = rows;
+    }
 }
 
 static void ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val) {
@@ -66,6 +68,22 @@ static void ReplaceObj(Tcl_Obj **slot, Tcl_Obj *val) {
     if (*slot)
         Tcl_DecrRefCount(*slot);
     *slot = val;
+}
+
+void Oradpi_ResetMsg(OradpiBase *h) {
+    if (!h)
+        return;
+    h->msg.rc          = 0;
+    h->msg.rows        = 0;
+    h->msg.peo         = 0;
+    h->msg.ocicode     = 0;
+    h->msg.recoverable = 0;
+    h->msg.warning     = 0;
+    h->msg.offset      = 0;
+    ReplaceObj(&h->msg.fn, NULL);
+    ReplaceObj(&h->msg.sqlstate, NULL);
+    ReplaceObj(&h->msg.action, NULL);
+    ReplaceObj(&h->msg.error, NULL);
 }
 
 void Oradpi_UpdateStmtType(OradpiStmt *s) {
@@ -243,6 +261,7 @@ static void Oradpi_PostFailoverEvent(OradpiConn *co, Tcl_Obj *message) {
 
 int Oradpi_SetErrorFromODPIInfo(Tcl_Interp *ip, OradpiBase *h, const char *where, const dpiErrorInfo *ei) {
     if (h) {
+        Oradpi_ResetMsg(h);
         h->msg.rc          = (int)ei->code;
         h->msg.ocicode     = (int)ei->code;
         h->msg.recoverable = (ei->isRecoverable ? 1 : 0);
@@ -296,6 +315,7 @@ int Oradpi_SetErrorFromODPI(Tcl_Interp *ip, OradpiBase *h, const char *where) {
 
 int Oradpi_SetError(Tcl_Interp *ip, OradpiBase *h, int code, const char *msg) {
     if (h) {
+        Oradpi_ResetMsg(h);
         h->msg.rc          = code;
         h->msg.ocicode     = code;
         h->msg.recoverable = 0;

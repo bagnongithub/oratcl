@@ -65,14 +65,17 @@ static int ExecOnce_WithRebind(Tcl_Interp *ip, OradpiStmt *s, const char *skey, 
     if (doCommit || (s->owner && s->owner->autocommit && (s->stmtIsDML || s->stmtIsPLSQL)))
         mode |= DPI_MODE_EXEC_COMMIT_ON_SUCCESS;
 
-    /* Execute with retry/backoff when failover policy is configured */
+    /* Execute queries with retry/backoff when failover policy is configured. */
     uint32_t maxAttempts = s->owner ? s->owner->foMaxAttempts : 0;
     uint32_t backoffMs   = s->owner ? s->owner->foBackoffMs : 100;
     double   backoffFact = s->owner ? s->owner->foBackoffFactor : 2.0;
     uint32_t errClasses  = s->owner ? s->owner->foErrorClasses : 0;
     /* overflow-safe totalTries computation */
     uint32_t totalTries;
-    if (maxAttempts > 0 && errClasses)
+    /* A lost response leaves DML/PLSQL outcome ambiguous: replaying it can
+     * duplicate already-applied work.  Automatic retry is therefore limited
+     * to statements classified by ODPI as queries. */
+    if (s->stmtIsQuery && maxAttempts > 0 && errClasses)
         totalTries = (maxAttempts >= UINT32_MAX) ? UINT32_MAX : maxAttempts + 1;
     else
         totalTries = 1;
@@ -88,6 +91,7 @@ static int ExecOnce_WithRebind(Tcl_Interp *ip, OradpiStmt *s, const char *skey, 
         execRc = dpiStmt_execute(s->stmt, mode, &nqc);
         if (execRc == DPI_SUCCESS) {
             uint64_t rows = 0;
+            Oradpi_ResetMsg((OradpiBase *)s);
             if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
                 Oradpi_RecordRows((OradpiBase *)s, rows);
             Oradpi_UpdateStmtType(s);
@@ -120,9 +124,9 @@ static int ExecOnce_WithRebind(Tcl_Interp *ip, OradpiStmt *s, const char *skey, 
     }
 
     if (execRc != DPI_SUCCESS) {
+        int errorCode = Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase *)s, "dpiStmt_execute", &lastEi);
         Oradpi_PendingsFree(&pr);
-        /* Use the captured error info to avoid stale thread-local state */
-        return Oradpi_SetErrorFromODPIInfo(ip, (OradpiBase *)s, "dpiStmt_execute", &lastEi);
+        return errorCode;
     }
 
     Oradpi_PendingsFree(&pr);
@@ -134,7 +138,8 @@ static int ExecOnce_WithRebind(Tcl_Interp *ip, OradpiStmt *s, const char *skey, 
  *
  *   Executes a previously parsed/bound statement. Rebinds stored bind
  *   variables, supports autocommit and explicit -commit. With failover
- *   policy configured, retries with exponential backoff on matching errors.
+ *   policy configured, queries retry with exponential backoff on matching
+ *   errors; DML and PL/SQL are never replayed automatically.
  *   Returns: 0 on success.
  *   Errors:  ODPI-C execution errors; invalid/unprepared handle; async busy.
  *   Thread-safety: safe — per-interp state only.
@@ -201,7 +206,7 @@ int Oradpi_Cmd_StmtSql(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const o
     CONN_GATE_ENTER(s->owner);
     if (dpiConn_prepareStmt(s->owner->conn, 0, sql, (uint32_t)slen, NULL, 0, &newStmt) != DPI_SUCCESS) {
         CONN_GATE_LEAVE(s->owner);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s->owner, "dpiConn_prepareStmt");
+        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiConn_prepareStmt");
     }
 
     if (s->stmt) {
@@ -226,6 +231,7 @@ int Oradpi_Cmd_StmtSql(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const o
 
     if (parseOnly) {
         Oradpi_UpdateStmtType(s);
+        Oradpi_ResetMsg((OradpiBase *)s);
         Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
         return TCL_OK;
     }
@@ -276,7 +282,7 @@ int Oradpi_Cmd_Plexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const ob
         CONN_GATE_ENTER(s->owner);
         if (dpiConn_prepareStmt(s->owner->conn, 0, sql, (uint32_t)bl, NULL, 0, &newStmt) != DPI_SUCCESS) {
             CONN_GATE_LEAVE(s->owner);
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s->owner, "dpiConn_prepareStmt");
+            return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiConn_prepareStmt");
         }
         if (s->stmt) {
             dpiStmt_close(s->stmt, NULL, 0);

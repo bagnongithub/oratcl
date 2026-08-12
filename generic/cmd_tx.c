@@ -45,6 +45,7 @@ int Oradpi_Cmd_Commit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const ob
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_commit");
     }
     CONN_GATE_LEAVE(co);
+    Oradpi_ResetMsg((OradpiBase *)co);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }
@@ -67,6 +68,7 @@ int Oradpi_Cmd_Rollback(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const 
         return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)co, "dpiConn_rollback");
     }
     CONN_GATE_LEAVE(co);
+    Oradpi_ResetMsg((OradpiBase *)co);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }

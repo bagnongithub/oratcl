@@ -15,6 +15,7 @@
  */
 
 #include <limits.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <string.h>
 /* strncasecmp is declared in <strings.h> on POSIX, not <string.h> */
@@ -36,6 +37,8 @@ typedef struct BindStore {
  * ========================================================================== */
 
 static int                          BindOneLobScalar(Tcl_Interp *ip, OradpiStmt *s, OradpiPendingRefs *pr, const char *nameNoColon, dpiOracleTypeNum lobType, const char *buf, uint32_t buflen);
+static int                          BindOneNumberText(Tcl_Interp *ip, OradpiStmt *s, OradpiPendingRefs *pr, const char *nameNoColon, const char *buf, uint32_t buflen);
+static Tcl_Obj                    *CanonicalNumberTextObj(Tcl_Obj *valueObj);
 static BindStore                   *GetBindStore(Tcl_Interp *ip, const char *stmtKey);
 static BindStoreMap                *GetBindStoreMap(Tcl_Interp *ip);
 static PendingMap                  *GetPendingMap(Tcl_Interp *ip);
@@ -61,6 +64,75 @@ static int                          CheckU32(Tcl_Interp *ip, Tcl_Size len, uint3
     }
     *out = (uint32_t)len;
     return TCL_OK;
+}
+
+/* ODPI's Oracle NUMBER text conversion accepts decimal notation, not Tcl's
+ * additional integer spellings (0x..., 0o..., 0b..., digit separators).
+ * Recognize text that Oracle can consume without first routing it through a
+ * C double, which would lose precision for large integers and decimals. */
+static int IsOracleDecimalText(const char *s, Tcl_Size len) {
+    Tcl_Size i = 0;
+    int      digits = 0;
+
+    if (!s || len <= 0)
+        return 0;
+    if (s[i] == '+' || s[i] == '-')
+        i++;
+    while (i < len && s[i] >= '0' && s[i] <= '9') {
+        digits++;
+        i++;
+    }
+    if (i < len && s[i] == '.') {
+        i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9') {
+            digits++;
+            i++;
+        }
+    }
+    if (digits == 0)
+        return 0;
+    if (i < len && (s[i] == 'e' || s[i] == 'E')) {
+        int exponentDigits = 0;
+        i++;
+        if (i < len && (s[i] == '+' || s[i] == '-'))
+            i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9') {
+            exponentDigits++;
+            i++;
+        }
+        if (exponentDigits == 0)
+            return 0;
+    }
+    return i == len;
+}
+
+/* Return an owned reference whose string representation is valid decimal
+ * NUMBER text.  Decimal input is kept verbatim for full precision; Tcl-only
+ * numeric spellings are regenerated from their exact numeric internal rep. */
+static Tcl_Obj *CanonicalNumberTextObj(Tcl_Obj *valueObj) {
+    Tcl_Size    len = 0;
+    const char *text = Tcl_GetStringFromObj(valueObj, &len);
+    if (IsOracleDecimalText(text, len)) {
+        Tcl_IncrRefCount(valueObj);
+        return valueObj;
+    }
+
+    void *numberRep = NULL;
+    int   numberType = 0;
+    if (Tcl_GetNumberFromObj(NULL, valueObj, &numberRep, &numberType) != TCL_OK)
+        return NULL;
+    (void)numberRep;
+    (void)numberType;
+
+    Tcl_Obj *canonical = Tcl_DuplicateObj(valueObj);
+    Tcl_IncrRefCount(canonical);
+    Tcl_InvalidateStringRep(canonical);
+    text = Tcl_GetStringFromObj(canonical, &len);
+    if (!IsOracleDecimalText(text, len)) {
+        Tcl_DecrRefCount(canonical);
+        return NULL;
+    }
+    return canonical;
 }
 
 static const Tcl_ObjType *EnsureBytearrayType(void) {
@@ -156,7 +228,7 @@ static int BindVarByNameDual(OradpiStmt *s, const char *nameNoColon, dpiVar *var
      * Reuse it to derive the bare-name length instead of calling strlen
      * a second time.  Only fall back to strlen when m==0 (name exceeded
      * buf[256] capacity — not a normal Oracle identifier). */
-    uint32_t nlen;
+    uint32_t nlen = 0;
     if (m > 0) {
         nlen = m - 1;
     } else {
@@ -188,7 +260,7 @@ static int BindValueByNameDual(OradpiStmt *s, const char *nameNoColon, dpiNative
      * Reuse it to derive the bare-name length instead of calling strlen
      * a second time.  Only fall back to strlen when m==0 (name exceeded
      * buf[256] capacity — not a normal Oracle identifier). */
-    uint32_t nlen;
+    uint32_t nlen = 0;
     if (m > 0) {
         nlen = m - 1;
     } else {
@@ -466,23 +538,26 @@ static int BindOneLobScalar(Tcl_Interp *ip, OradpiStmt *s, OradpiPendingRefs *pr
     }
 
     if (dpiConn_newTempLob(s->owner->conn, lobType, &lob) != DPI_SUCCESS) {
-        CONN_GATE_LEAVE(s->owner);
+        int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiConn_newTempLob");
         dpiVar_release(var);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiConn_newTempLob");
+        CONN_GATE_LEAVE(s->owner);
+        return errorCode;
     }
     if (buflen > 0) {
         if (dpiLob_setFromBytes(lob, buf, (uint64_t)buflen) != DPI_SUCCESS) {
-            CONN_GATE_LEAVE(s->owner);
+            int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiLob_setFromBytes");
             dpiLob_release(lob);
             dpiVar_release(var);
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiLob_setFromBytes");
+            CONN_GATE_LEAVE(s->owner);
+            return errorCode;
         }
     }
     if (dpiVar_setFromLob(var, 0, lob) != DPI_SUCCESS) {
-        CONN_GATE_LEAVE(s->owner);
+        int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiVar_setFromLob");
         dpiLob_release(lob);
         dpiVar_release(var);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiVar_setFromLob");
+        CONN_GATE_LEAVE(s->owner);
+        return errorCode;
     }
     dpiLob_release(lob);
     CONN_GATE_LEAVE(s->owner);
@@ -492,6 +567,35 @@ static int BindOneLobScalar(Tcl_Interp *ip, OradpiStmt *s, OradpiPendingRefs *pr
         return TCL_ERROR;
     }
 
+    Oradpi_PendingsAdd(pr, var);
+    return TCL_OK;
+}
+
+/* Bind a numeric Tcl value through Oracle NUMBER's text conversion.  This
+ * retains all decimal digits when the value is outside Tcl_WideInt; binding a
+ * C double here would silently round NUMBER(38) and arbitrary-scale decimals. */
+static int BindOneNumberText(Tcl_Interp *ip, OradpiStmt *s, OradpiPendingRefs *pr, const char *nameNoColon, const char *buf, uint32_t buflen) {
+    dpiVar  *var  = NULL;
+    dpiData *data = NULL;
+    uint32_t maxSize = buflen > 0 ? buflen : 1;
+
+    CONN_GATE_ENTER(s->owner);
+    if (dpiConn_newVar(s->owner->conn, DPI_ORACLE_TYPE_NUMBER, DPI_NATIVE_TYPE_BYTES, 1, maxSize, 1, 0, NULL, &var, &data) != DPI_SUCCESS) {
+        CONN_GATE_LEAVE(s->owner);
+        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiConn_newVar(NUMBER)");
+    }
+    if (dpiVar_setFromBytes(var, 0, buf, buflen) != DPI_SUCCESS) {
+        int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiVar_setFromBytes(NUMBER)");
+        dpiVar_release(var);
+        CONN_GATE_LEAVE(s->owner);
+        return errorCode;
+    }
+    CONN_GATE_LEAVE(s->owner);
+
+    if (BindVarByNameDual(s, nameNoColon, var, ip, "dpiStmt_bindByName(NUMBER)") != TCL_OK) {
+        dpiVar_release(var);
+        return TCL_ERROR;
+    }
     Oradpi_PendingsAdd(pr, var);
     return TCL_OK;
 }
@@ -558,8 +662,23 @@ int Oradpi_BindOneByValue(Tcl_Interp *ip, OradpiStmt *s, OradpiPendingRefs *pr, 
         return BindValueByNameDual(s, nameNoColon, DPI_NATIVE_TYPE_INT64, &d, ip, "dpiStmt_bindValueByName(int64)");
     }
     if (Tcl_GetDoubleFromObj(NULL, valueObj, &dd) == TCL_OK) {
-        d.value.asDouble = dd;
-        return BindValueByNameDual(s, nameNoColon, DPI_NATIVE_TYPE_DOUBLE, &d, ip, "dpiStmt_bindValueByName(double)");
+        if (!isfinite(dd)) {
+            d.value.asDouble = dd;
+            return BindValueByNameDual(s, nameNoColon, DPI_NATIVE_TYPE_DOUBLE, &d, ip, "dpiStmt_bindValueByName(double)");
+        }
+        Tcl_Obj *numberText = CanonicalNumberTextObj(valueObj);
+        if (!numberText)
+            return Oradpi_SetError(ip, (OradpiBase *)s, -1, "numeric value cannot be represented as Oracle NUMBER text");
+        Tcl_Size    numberLen = 0;
+        const char *numberBuf = Tcl_GetStringFromObj(numberText, &numberLen);
+        uint32_t sl32 = 0;
+        if (CheckU32(ip, numberLen, &sl32) != TCL_OK) {
+            Tcl_DecrRefCount(numberText);
+            return TCL_ERROR;
+        }
+        int result = BindOneNumberText(ip, s, pr, nameNoColon, numberBuf, sl32);
+        Tcl_DecrRefCount(numberText);
+        return result;
     }
 
     dpiEncodingInfo enc;
@@ -633,6 +752,17 @@ int Oradpi_Cmd_Orabind(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const o
     if (Oradpi_StmtIsAsyncBusy(s))
         return Oradpi_SetError(ip, (OradpiBase *)s, -1, "statement is busy (async operation in progress)");
 
+    if (((objc - 2) % 2) != 0) {
+        Tcl_WrongNumArgs(ip, 1, objv, "statement-handle :name value ? :name value ... ?");
+        return TCL_ERROR;
+    }
+    for (Tcl_Size p = 2; p < objc; p += 2) {
+        if (Tcl_GetString(objv[p])[0] != ':') {
+            Tcl_WrongNumArgs(ip, 1, objv, "statement-handle :name value ? :name value ... ?");
+            return TCL_ERROR;
+        }
+    }
+
     const char        *stmtKey = Tcl_GetString(objv[1]);
     OradpiPendingRefs *pr      = GetPendings(ip, stmtKey);
     Oradpi_PendingsReleaseAll(pr);
@@ -651,11 +781,12 @@ int Oradpi_Cmd_Orabind(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const o
         i += 2;
         saw = 1;
     }
-    if (!saw) {
+    if (!saw || i != objc) {
         Tcl_WrongNumArgs(ip, 1, objv, "statement-handle :name value ? :name value ... ?");
         return TCL_ERROR;
     }
 
+    Oradpi_ResetMsg((OradpiBase *)s);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(0));
     return TCL_OK;
 }
@@ -669,7 +800,6 @@ typedef struct ArrSpec {
     dpiOracleTypeNum ora;
     dpiNativeTypeNum nat;
     uint32_t         elemSize;
-    int              sizeIsBytes;
     dpiVar          *var;
     dpiData         *data;
     /* For BYTES columns: array of IncrRefCount'd source Tcl_Obj* whose
@@ -725,20 +855,29 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
     int      doCommit = 0;
     int      arrayDml = 0;
 
-    Tcl_Size i        = 2;
-    while (i < objc) {
-        const char *opt = Tcl_GetString(objv[i]);
+    Tcl_Size pairCount = 0;
+    for (Tcl_Size p = 2; p < objc;) {
+        const char *opt = Tcl_GetString(objv[p]);
         if (strcmp(opt, "-commit") == 0) {
             doCommit = 1;
-            i++;
+            p++;
             continue;
         }
         if (strcmp(opt, "-arraydml") == 0) {
             arrayDml = 1;
-            i++;
+            p++;
             continue;
         }
-        break;
+        if (opt[0] != ':' || p + 1 >= objc) {
+            Tcl_WrongNumArgs(ip, 1, objv, "statement-handle ?-commit? ?-arraydml? :name value|list ...");
+            return TCL_ERROR;
+        }
+        pairCount++;
+        p += 2;
+    }
+    if (pairCount == 0) {
+        Tcl_WrongNumArgs(ip, 1, objv, "statement-handle ?-commit? ?-arraydml? :name value|list ...");
+        return TCL_ERROR;
     }
 
     if (arrayDml) {
@@ -750,8 +889,13 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
         ArrSpec *specs    = (ArrSpec *)Tcl_Alloc(specsBytes);
         Tcl_Size expected = -1;
 
-        Tcl_Size j        = i;
-        while (j + 1 < objc && Tcl_GetString(objv[j])[0] == ':') {
+        Tcl_Size j        = 2;
+        while (j < objc) {
+            const char *arg = Tcl_GetString(objv[j]);
+            if (strcmp(arg, "-commit") == 0 || strcmp(arg, "-arraydml") == 0) {
+                j++;
+                continue;
+            }
             if (nSpecs == cap) {
                 Tcl_Size newCap     = 0;
                 size_t   specsBytes = 0;
@@ -793,20 +937,23 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             as->ora         = DPI_ORACLE_TYPE_VARCHAR;
             as->nat         = DPI_NATIVE_TYPE_BYTES;
             as->elemSize    = 1;
-            as->sizeIsBytes = 1;
             /* Scan ALL elements to determine type consistently.
              * Only use numeric type if every element parses as that type. */
-            int allInt = 1, allNumeric = 1;
+            int allInt = 1, allNumeric = 1, allFinite = 1;
             for (Tcl_Size p = 0; p < as->count; p++) {
                 Tcl_Obj *ep = NULL;
                 Tcl_ListObjIndex(ip, as->listObj, p, &ep);
                 Tcl_IncrRefCount(ep);
                 Tcl_WideInt wi;
-                double      dd;
-                if (Tcl_GetWideIntFromObj(NULL, ep, &wi) != TCL_OK)
+                int         isInt = (Tcl_GetWideIntFromObj(NULL, ep, &wi) == TCL_OK);
+                if (!isInt) {
                     allInt = 0;
-                if (allInt == 0 && Tcl_GetDoubleFromObj(NULL, ep, &dd) != TCL_OK)
-                    allNumeric = 0;
+                    double dd = 0.0;
+                    if (Tcl_GetDoubleFromObj(NULL, ep, &dd) != TCL_OK)
+                        allNumeric = 0;
+                    else if (!isfinite(dd))
+                        allFinite = 0;
+                }
                 /* use CheckU32 instead of raw (uint32_t) cast */
                 Tcl_Size sl = 0;
                 (void)Tcl_GetStringFromObj(ep, &sl);
@@ -825,7 +972,38 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                 as->nat = DPI_NATIVE_TYPE_INT64;
             } else if (allNumeric) {
                 as->ora = DPI_ORACLE_TYPE_NUMBER;
-                as->nat = DPI_NATIVE_TYPE_DOUBLE;
+                /* Preserve finite values as exact decimal text.  Retain the
+                 * legacy DOUBLE route for non-finite values, which Oracle may
+                 * reject according to the target type. */
+                as->nat = allFinite ? DPI_NATIVE_TYPE_BYTES : DPI_NATIVE_TYPE_DOUBLE;
+            }
+
+            /* Tcl accepts exact numeric spellings that Oracle does not (for
+             * example 0x... and digit separators).  Recompute NUMBER's
+             * element size from canonical decimal text before allocating the
+             * ODPI variable; decimal input itself remains untouched. */
+            if (as->ora == DPI_ORACLE_TYPE_NUMBER && as->nat == DPI_NATIVE_TYPE_BYTES) {
+                as->elemSize = 1;
+                for (Tcl_Size p = 0; p < as->count; p++) {
+                    Tcl_Obj *ep = NULL;
+                    Tcl_ListObjIndex(ip, as->listObj, p, &ep);
+                    Tcl_Obj *numberText = CanonicalNumberTextObj(ep);
+                    if (!numberText) {
+                        FreeArrSpecs(specs, nSpecs + 1, 0);
+                        return Oradpi_SetError(ip, (OradpiBase *)s, -1, "array element cannot be represented as Oracle NUMBER text");
+                    }
+                    Tcl_Size numberLen = 0;
+                    (void)Tcl_GetStringFromObj(numberText, &numberLen);
+                    uint32_t numberLen32 = 0;
+                    if (CheckU32(ip, numberLen, &numberLen32) != TCL_OK) {
+                        Tcl_DecrRefCount(numberText);
+                        FreeArrSpecs(specs, nSpecs + 1, 0);
+                        return TCL_ERROR;
+                    }
+                    if (numberLen32 > as->elemSize)
+                        as->elemSize = numberLen32;
+                    Tcl_DecrRefCount(numberText);
+                }
             }
             if (as->nat == DPI_NATIVE_TYPE_BYTES && as->elemSize == 0)
                 as->elemSize = 1;
@@ -864,8 +1042,9 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
             if (dpiConn_newVar(s->owner->conn, as->ora, as->nat, iters, (as->nat == DPI_NATIVE_TYPE_BYTES) ? as->elemSize : 0, (as->nat == DPI_NATIVE_TYPE_BYTES), 0, NULL, &as->var, &as->data) !=
                 DPI_SUCCESS) {
                 CONN_GATE_LEAVE(s->owner);
+                int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiConn_newVar(array)");
                 FreeArrSpecs(specs, nSpecs, iters);
-                return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiConn_newVar(array)");
+                return errorCode;
             }
             CONN_GATE_LEAVE(s->owner);
 
@@ -909,12 +1088,25 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                     as->data[r].isNull         = 0;
                     as->data[r].value.asDouble = dd;
                 } else {
-                    Tcl_Size    sl   = 0;
-                    const char *sv   = Tcl_GetStringFromObj(e, &sl);
+                    /* For NUMBER, pin canonical decimal text rather than a
+                     * Tcl-only spelling such as 0x....  VARCHAR values pin
+                     * the original list element exactly as supplied. */
+                    Tcl_Obj *pinnedObj = e;
+                    if (as->ora == DPI_ORACLE_TYPE_NUMBER) {
+                        pinnedObj = CanonicalNumberTextObj(e);
+                        Tcl_DecrRefCount(e);
+                        if (!pinnedObj) {
+                            Tcl_SetObjResult(ip, Tcl_ObjPrintf("orabindexec -arraydml: element %u is not valid Oracle NUMBER text", r));
+                            FreeArrSpecs(specs, nSpecs, iters);
+                            return TCL_ERROR;
+                        }
+                    }
+                    Tcl_Size    sl = 0;
+                    const char *sv = Tcl_GetStringFromObj(pinnedObj, &sl);
                     /* guard narrowing to uint32_t */
                     uint32_t    sl32 = 0;
                     if (CheckU32(ip, sl, &sl32) != TCL_OK) {
-                        Tcl_DecrRefCount(e);
+                        Tcl_DecrRefCount(pinnedObj);
                         FreeArrSpecs(specs, nSpecs, iters);
                         return TCL_ERROR;
                     }
@@ -922,7 +1114,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                      * The element is pinned (IncrRefCount) so it cannot be
                      * freed or shimmered during dpiStmt_executeMany.
                      * FreeArrSpecs DecrRefCounts all pinnedElems after execute. */
-                    as->pinnedElems[r]                 = e; /* transfer ownership; skip DecrRefCount below */
+                    as->pinnedElems[r]                 = pinnedObj; /* transfer ownership; skip DecrRefCount below */
                     as->data[r].isNull                 = 0;
                     as->data[r].value.asBytes.ptr      = (char *)sv;
                     as->data[r].value.asBytes.length   = sl32;
@@ -947,8 +1139,9 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
         CONN_GATE_ENTER(s->owner);
         if (dpiStmt_executeMany(s->stmt, mode, iters) != DPI_SUCCESS) {
             CONN_GATE_LEAVE(s->owner);
+            int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_executeMany");
             FreeArrSpecs(specs, nSpecs, iters);
-            return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_executeMany");
+            return errorCode;
         }
 
         /* When DPI_MODE_EXEC_BATCH_ERRORS is set, individual row failures
@@ -969,6 +1162,9 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
                         Tcl_ListObjAppendElement(ip, triple, Tcl_NewStringObj(errs[e].message ? errs[e].message : "", -1));
                         Tcl_ListObjAppendElement(ip, errList, triple);
                     }
+                    /* Persist the first row error in oramsg before releasing
+                     * variables or the ODPI-owned batch error storage. */
+                    Oradpi_SetErrorFromODPIInfo(NULL, (OradpiBase *)s, "dpiStmt_executeMany", &errs[0]);
                     Tcl_Free((char *)errs);
                     CONN_GATE_LEAVE(s->owner);
                     FreeArrSpecs(specs, nSpecs, iters);
@@ -982,6 +1178,7 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
         }
 
         uint64_t rows = 0;
+        Oradpi_ResetMsg((OradpiBase *)s);
         if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
             Oradpi_RecordRows((OradpiBase *)s, rows);
         CONN_GATE_LEAVE(s->owner);
@@ -997,8 +1194,13 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
     OradpiPendingRefs *pr      = GetPendings(ip, stmtKey);
     BindStore         *bs      = GetBindStore(ip, stmtKey);
 
-    Tcl_Size           k       = i;
-    while (k + 1 < objc && Tcl_GetString(objv[k])[0] == ':') {
+    Tcl_Size           k       = 2;
+    while (k < objc) {
+        const char *arg = Tcl_GetString(objv[k]);
+        if (strcmp(arg, "-commit") == 0 || strcmp(arg, "-arraydml") == 0) {
+            k++;
+            continue;
+        }
         const char *nameNoColon = Oradpi_StripColon(Tcl_GetString(objv[k]));
         Tcl_Obj    *val         = objv[k + 1];
 
@@ -1019,11 +1221,13 @@ int Oradpi_Cmd_Orabindexec(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *con
     CONN_GATE_ENTER(s->owner);
     if (dpiStmt_execute(s->stmt, mode, &nqc) != DPI_SUCCESS) {
         CONN_GATE_LEAVE(s->owner);
+        int errorCode = Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_execute");
         Oradpi_PendingsReleaseAll(pr);
-        return Oradpi_SetErrorFromODPI(ip, (OradpiBase *)s, "dpiStmt_execute");
+        return errorCode;
     }
 
     uint64_t rows = 0;
+    Oradpi_ResetMsg((OradpiBase *)s);
     if (dpiStmt_getRowCount(s->stmt, &rows) == DPI_SUCCESS)
         Oradpi_RecordRows((OradpiBase *)s, rows);
     CONN_GATE_LEAVE(s->owner);

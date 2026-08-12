@@ -78,8 +78,9 @@ Options:
 Create a session pool (or acquire from an existing one — see below) and check out the first
 connection from it. \fImin\fR, \fImax\fR, and \fIincr\fR control the minimum, maximum, and
 increment sizes of the pool.
-Multiple \fBoralogon -pool\fR calls with identical parameters share one underlying session pool
-process-wide; only the first call creates the pool. Different parameters create distinct pools.
+Multiple \fBoralogon -pool\fR calls share one underlying session pool process-wide only when
+credentials, connect identifier, mode, sizing, and tuning parameters all match. A different
+password or get mode therefore creates a distinct pool.
 .IP "\fB-homogeneous\fR 0|1" 4
 Homogeneous pool (default 1).
 .IP "\fB-getmode\fR wait|nowait|forceget|timedwait" 4
@@ -131,7 +132,8 @@ known-good and the round-trip cost is measurable.
 Parse and, unless \fB-parseonly\fR, execute once. Clears the per-statement stored-bind cache if text changes.
 .TP
 \fBoraexec\fR \fIstmt\fR ?\fB-commit\fR?
-Execute the already-parsed statement. Supports driver-side failover with configurable retry/backoff.
+Execute the already-parsed statement. Supports configurable driver-side retry/backoff for queries.
+DML and PL/SQL are never replayed automatically because a lost response leaves their outcome ambiguous.
 .TP
 \fBoraplexec\fR \fIstmt\fR \fI{pl/sql}\fR ?\fB-commit\fR?
 Prepare and execute a PL/SQL block.
@@ -152,6 +154,10 @@ Use \fB-returnrows\fR or \fB-resultvariable\fR to obtain a list of rows; \fB-asd
 .PP
 Fetched data is deep-copied into local snapshots so that \fB-command\fR callbacks can safely issue other
 database operations (including closing the statement) without deadlock.
+.PP
+Oracle \fBNUMBER\fR values are converted through decimal text to preserve full precision. ROWID values
+are returned as text. Timestamps retain nine fractional-second digits; \fBTIMESTAMP WITH TIME ZONE\fR
+also includes its numeric offset. Both year-to-month and day-to-second intervals are returned as text.
 
 .SS Metadata
 .TP
@@ -207,6 +213,8 @@ Cancel the currently executing call on this connection via the shared connection
 Return per-handle diagnostic information. Fields: \fBrc\fR, \fBerror\fR, \fBrows\fR,
 \fBpeo\fR (parse error offset), \fBocicode\fR, \fBsqltype\fR, \fBfn\fR, \fBaction\fR,
 \fBsqlstate\fR, \fBrecoverable\fR, \fBwarning\fR, \fBoffset\fR, \fBall\fR, \fBallx\fR.
+The fields describe the latest database operation on that handle; a successful operation clears stale
+error diagnostics while retaining statement type information.
 
 .SH CONFIGURATION
 Use \fBoraconfig\fR on a \fBlogon-handle\fR or a \fBstatement-handle\fR.
@@ -236,7 +244,7 @@ Maximum retry attempts for driver-side failover (capped at 1000).
 Initial backoff in milliseconds between retries.
 .TP
 \fBfoBackoffFactor\fR
-Exponential multiplier for each successive backoff interval.
+Finite, non-negative exponential multiplier for each successive backoff interval.
 .TP
 \fBfoErrorClasses\fR
 List of error classes that trigger retries: \fBnetwork\fR and/or \fBconnlost\fR.

@@ -346,23 +346,53 @@ void *Oradpi_ConnGateToken(OradpiConn *co) {
     return co ? (void *)co->shared : NULL;
 }
 
-/* Copy behavioral policy from an OradpiConn wrapper to its
- * GlobalConnRec snapshot.  Called at publish time and after oraconfig
- * changes, so that adopters in other interps inherit the owner's policy. */
-void Oradpi_SharedConnSyncBehavior(OradpiConn *co) {
+/* Copy only fields changed by this wrapper.  A masked update is essential:
+ * another interpreter may have a wrapper whose other local fields predate a
+ * newer update, and copying the whole wrapper would silently roll that update
+ * back. */
+void Oradpi_SharedConnSyncBehavior(OradpiConn *co, uint32_t mask) {
     if (!co || !co->shared)
         return;
     GlobalConnRec *gr = co->shared;
     Tcl_MutexLock(&gConnMapMutex);
-    gr->snap_autocommit      = co->autocommit;
-    gr->snap_fetchArraySize  = co->fetchArraySize;
-    gr->snap_prefetchRows    = co->prefetchRows;
-    gr->snap_inlineLobs      = co->inlineLobs;
-    gr->snap_foMaxAttempts   = co->foMaxAttempts;
-    gr->snap_foBackoffMs     = co->foBackoffMs;
-    gr->snap_foBackoffFactor = co->foBackoffFactor;
-    gr->snap_foErrorClasses  = co->foErrorClasses;
-    gr->snap_foDebounceMs    = co->foDebounceMs;
+    if (mask & ORADPI_BEHAVIOR_AUTOCOMMIT)
+        gr->snap_autocommit = co->autocommit;
+    if (mask & ORADPI_BEHAVIOR_FETCHARRAY)
+        gr->snap_fetchArraySize = co->fetchArraySize;
+    if (mask & ORADPI_BEHAVIOR_PREFETCH)
+        gr->snap_prefetchRows = co->prefetchRows;
+    if (mask & ORADPI_BEHAVIOR_INLINELOBS)
+        gr->snap_inlineLobs = co->inlineLobs;
+    if (mask & ORADPI_BEHAVIOR_FOMAXATTEMPTS)
+        gr->snap_foMaxAttempts = co->foMaxAttempts;
+    if (mask & ORADPI_BEHAVIOR_FOBACKOFFMS)
+        gr->snap_foBackoffMs = co->foBackoffMs;
+    if (mask & ORADPI_BEHAVIOR_FOBACKOFFFACTOR)
+        gr->snap_foBackoffFactor = co->foBackoffFactor;
+    if (mask & ORADPI_BEHAVIOR_FOERRORCLASSES)
+        gr->snap_foErrorClasses = co->foErrorClasses;
+    if (mask & ORADPI_BEHAVIOR_FODEBOUNCEMS)
+        gr->snap_foDebounceMs = co->foDebounceMs;
+    Tcl_MutexUnlock(&gConnMapMutex);
+}
+
+/* Refresh a wrapper before it is handed to a command.  Tcl objects remain
+ * wrapper-local, but scalar behavior is one coherent policy for the shared
+ * physical connection. */
+void Oradpi_SharedConnRefreshBehavior(OradpiConn *co) {
+    if (!co || !co->shared)
+        return;
+    GlobalConnRec *gr = co->shared;
+    Tcl_MutexLock(&gConnMapMutex);
+    co->autocommit      = gr->snap_autocommit;
+    co->fetchArraySize  = gr->snap_fetchArraySize;
+    co->prefetchRows    = gr->snap_prefetchRows;
+    co->inlineLobs      = gr->snap_inlineLobs;
+    co->foMaxAttempts   = gr->snap_foMaxAttempts;
+    co->foBackoffMs     = gr->snap_foBackoffMs;
+    co->foBackoffFactor = gr->snap_foBackoffFactor;
+    co->foErrorClasses  = gr->snap_foErrorClasses;
+    co->foDebounceMs    = gr->snap_foDebounceMs;
     Tcl_MutexUnlock(&gConnMapMutex);
 }
 
@@ -374,7 +404,7 @@ static void Oradpi_RegisterConnInInterp(OradpiInterpState *st, OradpiConn *co) {
     co->shared = GlobalConn_PublishAndRef(hname, co->conn, co->pool);
     /* Populate behavioral snapshot on the shared record so
      * adopters inherit the owner's current policy. */
-    Oradpi_SharedConnSyncBehavior(co);
+    Oradpi_SharedConnSyncBehavior(co, ORADPI_BEHAVIOR_ALL);
 }
 
 /* ---- Centralized OradpiMsg cleanup ---- */
@@ -765,8 +795,10 @@ OradpiConn *Oradpi_LookupConn(Tcl_Interp *ip, Tcl_Obj *nameObj) {
 
     if (e) {
         OradpiConn *co = (OradpiConn *)Tcl_GetHashValue(e);
-        if (co && co->conn)
+        if (co && co->conn) {
+            Oradpi_SharedConnRefreshBehavior(co);
             return co;
+        }
         /* Dead connection: remove from hash and free the struct */
         Tcl_DeleteHashEntry(e);
         if (co)
@@ -808,7 +840,10 @@ OradpiStmt *Oradpi_LookupStmt(Tcl_Interp *ip, Tcl_Obj *nameObj) {
         return NULL;
     const char    *name = Tcl_GetString(nameObj);
     Tcl_HashEntry *e    = Tcl_FindHashEntry(&st->stmts, name);
-    return e ? (OradpiStmt *)Tcl_GetHashValue(e) : NULL;
+    OradpiStmt *s = e ? (OradpiStmt *)Tcl_GetHashValue(e) : NULL;
+    if (s && s->owner)
+        Oradpi_SharedConnRefreshBehavior(s->owner);
+    return s;
 }
 
 OradpiLob *Oradpi_NewLob(Tcl_Interp *ip, dpiLob *lob, GlobalConnRec *shared) {

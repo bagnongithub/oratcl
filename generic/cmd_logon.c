@@ -53,7 +53,6 @@ static int Oradpi_ParseConnect(const char *cs, const char **user, uint32_t *ulen
 typedef struct PoolEntry {
     dpiPool     *pool;
     unsigned int refCount;
-    char        *key; /* owned copy of the lookup key */
 } PoolEntry;
 
 static Tcl_Mutex     gPoolMapMutex;
@@ -73,8 +72,6 @@ static void          PoolRegistry_ExitHandler(void *unused) {
                     dpiPool_close(pe->pool, DPI_MODE_POOL_CLOSE_DEFAULT);
                     dpiPool_release(pe->pool);
                 }
-                if (pe->key)
-                    Tcl_Free(pe->key);
                 Tcl_Free((char *)pe);
             }
         }
@@ -99,19 +96,19 @@ static void PoolRegistry_Init(void) {
  * caller (either by dpiPool_addRef on an existing pool, or owned from
  * dpiPool_create for a new one); also increments pe->refCount.
  * On failure: returns NULL; does not modify the registry. */
-static dpiPool *PoolRegistry_Acquire(dpiContext *ctx, const char *key, const char *user, uint32_t ulen, const char *pw, uint32_t plen, const char *db, uint32_t dblen, dpiCommonCreateParams *cparams,
-                                     dpiPoolCreateParams *pp, int getmode) {
+static dpiPool *PoolRegistry_Acquire(Tcl_Interp *ip, dpiContext *ctx, const char *key, const char *user, uint32_t ulen, const char *pw, uint32_t plen, const char *db, uint32_t dblen,
+                                     dpiCommonCreateParams *cparams, dpiPoolCreateParams *pp, int getmode) {
     PoolRegistry_Init();
 
     Tcl_MutexLock(&gPoolMapMutex);
-    int            isNew = 0;
-    Tcl_HashEntry *he    = Tcl_CreateHashEntry(&gPoolMap, key, &isNew);
-    PoolEntry     *pe    = isNew ? NULL : (PoolEntry *)Tcl_GetHashValue(he);
+    Tcl_HashEntry *he = Tcl_FindHashEntry(&gPoolMap, key);
+    PoolEntry     *pe = he ? (PoolEntry *)Tcl_GetHashValue(he) : NULL;
 
-    if (!isNew && pe && pe->pool) {
+    if (pe && pe->pool) {
         /* Existing pool — addRef so the caller holds an independent ref */
         if (dpiPool_addRef(pe->pool) != DPI_SUCCESS) {
             Tcl_MutexUnlock(&gPoolMapMutex);
+            Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_addRef");
             return NULL;
         }
         pe->refCount++;
@@ -125,9 +122,14 @@ static dpiPool *PoolRegistry_Acquire(dpiContext *ctx, const char *key, const cha
     Tcl_MutexUnlock(&gPoolMapMutex);
 
     dpiPool *pool = NULL;
-    if (dpiPool_create(ctx, user, ulen, pw, plen, db, dblen, cparams, pp, &pool) != DPI_SUCCESS)
+    if (dpiPool_create(ctx, user, ulen, pw, plen, db, dblen, cparams, pp, &pool) != DPI_SUCCESS) {
+        Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_create");
         return NULL;
+    }
     if (dpiPool_setGetMode(pool, (dpiPoolGetMode)getmode) != DPI_SUCCESS) {
+        /* Preserve the failing call before close/release overwrite ODPI's
+         * thread-local diagnostic buffer. */
+        Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_setGetMode");
         dpiPool_close(pool, DPI_MODE_POOL_CLOSE_DEFAULT);
         dpiPool_release(pool);
         return NULL;
@@ -137,31 +139,37 @@ static dpiPool *PoolRegistry_Acquire(dpiContext *ctx, const char *key, const cha
      * already created a pool for the same key.  If so, prefer the existing
      * one: close ours and addRef theirs. */
     Tcl_MutexLock(&gPoolMapMutex);
-    isNew = 0;
-    he    = Tcl_CreateHashEntry(&gPoolMap, key, &isNew);
+    int isNew = 0;
+    he        = Tcl_CreateHashEntry(&gPoolMap, key, &isNew);
     pe    = isNew ? NULL : (PoolEntry *)Tcl_GetHashValue(he);
 
     if (!isNew && pe && pe->pool) {
-        /* Lost the race — use the winner's pool */
-        dpiPool_close(pool, DPI_MODE_POOL_CLOSE_DEFAULT);
-        dpiPool_release(pool);
-        if (dpiPool_addRef(pe->pool) != DPI_SUCCESS) {
+        /* Lost the race.  Protect the winner while holding the registry
+         * lock, but dispose of our newly-created pool after unlocking: a
+         * pool close can block on Oracle and must not stall every registry
+         * operation. */
+        dpiPool *loser  = pool;
+        dpiPool *winner = pe->pool;
+        if (dpiPool_addRef(winner) != DPI_SUCCESS) {
             Tcl_MutexUnlock(&gPoolMapMutex);
+            /* Capture the addRef failure before closing the loser changes
+             * ODPI's thread-local diagnostic buffer. */
+            Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_addRef");
+            dpiPool_close(loser, DPI_MODE_POOL_CLOSE_DEFAULT);
+            dpiPool_release(loser);
             return NULL;
         }
         pe->refCount++;
-        pool = pe->pool;
         Tcl_MutexUnlock(&gPoolMapMutex);
-        return pool;
+        dpiPool_close(loser, DPI_MODE_POOL_CLOSE_DEFAULT);
+        dpiPool_release(loser);
+        return winner;
     }
 
     /* We won — publish */
     pe           = (PoolEntry *)Tcl_Alloc(sizeof(*pe));
     pe->pool     = pool;
     pe->refCount = 1;
-    size_t klen  = strlen(key) + 1;
-    pe->key      = (char *)Tcl_Alloc(klen);
-    memcpy(pe->key, key, klen);
     Tcl_SetHashValue(he, pe);
     /* Caller gets the pool* we just created — already has refCount 1 from
      * dpiPool_create; no additional addRef needed. */
@@ -186,8 +194,6 @@ static void PoolRegistry_Release(const char *key, dpiPool *pool) {
                 pe->refCount--;
             if (pe && pe->refCount == 0) {
                 doClose = 1;
-                if (pe->key)
-                    Tcl_Free(pe->key);
                 Tcl_Free((char *)pe);
                 Tcl_DeleteHashEntry(he);
             }
@@ -200,23 +206,45 @@ static void PoolRegistry_Release(const char *key, dpiPool *pool) {
     dpiPool_release(pool);
 }
 
-/* Build the canonical registry key from pool parameters.
- * Key format: "user@db|min:max:incr:hom:ext|wait:to:life:ping:pingto:sc"
- * Passwords are intentionally excluded from the key — they are credentials,
- * not pool-identity parameters, and different callers sharing a pool may
- * use different authentication wrappers. */
-static void PoolRegistry_BuildKey(Tcl_DString *ds, const char *user, uint32_t ulen, const char *db, uint32_t dblen, Tcl_WideInt minS, Tcl_WideInt maxS, Tcl_WideInt incS, int homogeneous, int ext,
-                                  Tcl_WideInt waitTimeout, Tcl_WideInt timeout, Tcl_WideInt maxLifetime, Tcl_WideInt pingInterval, Tcl_WideInt pingTimeout, Tcl_WideInt stmtCacheSize) {
+/* Length-prefix variable fields so delimiter characters inside credentials or
+ * connect identifiers cannot alias another key.  A homogeneous pool is
+ * authenticated with the credentials used at creation, so both the password
+ * and get mode are part of its identity. */
+static void PoolKeyAppendField(Tcl_DString *ds, const char *tag, const char *value, uint32_t length) {
+    char lenBuf[32];
+    snprintf(lenBuf, sizeof(lenBuf), "%u:", length);
+    Tcl_DStringAppend(ds, tag, -1);
+    Tcl_DStringAppend(ds, lenBuf, -1);
+    if (value && length > 0)
+        Tcl_DStringAppend(ds, value, (Tcl_Size)length);
+    Tcl_DStringAppend(ds, "|", 1);
+}
+
+static void PoolKeyAppendWide(Tcl_DString *ds, Tcl_WideInt value) {
+    char valueBuf[64];
+    snprintf(valueBuf, sizeof(valueBuf), "%" TCL_LL_MODIFIER "d|", value);
+    Tcl_DStringAppend(ds, valueBuf, -1);
+}
+
+static void PoolRegistry_BuildKey(Tcl_DString *ds, const char *user, uint32_t ulen, const char *pw, uint32_t plen, const char *db, uint32_t dblen, Tcl_WideInt minS, Tcl_WideInt maxS,
+                                  Tcl_WideInt incS, int homogeneous, int ext, int getmode, Tcl_WideInt waitTimeout, Tcl_WideInt timeout, Tcl_WideInt maxLifetime, Tcl_WideInt pingInterval,
+                                  Tcl_WideInt pingTimeout, Tcl_WideInt stmtCacheSize) {
     Tcl_DStringInit(ds);
-    Tcl_DStringAppend(ds, user ? user : "", (Tcl_Size)ulen);
-    Tcl_DStringAppend(ds, "@", 1);
-    Tcl_DStringAppend(ds, db ? db : "", (Tcl_Size)dblen);
-    char buf[128];
-    snprintf(buf, sizeof(buf),
-             "|%" TCL_LL_MODIFIER "d:%" TCL_LL_MODIFIER "d:%" TCL_LL_MODIFIER "d:%d:%d"
-             "|%" TCL_LL_MODIFIER "d:%" TCL_LL_MODIFIER "d:%" TCL_LL_MODIFIER "d:%" TCL_LL_MODIFIER "d:%" TCL_LL_MODIFIER "d:%" TCL_LL_MODIFIER "d",
-             minS, maxS, incS, homogeneous, ext, waitTimeout, timeout, maxLifetime, pingInterval, pingTimeout, stmtCacheSize);
-    Tcl_DStringAppend(ds, buf, -1);
+    PoolKeyAppendField(ds, "u", user, ulen);
+    PoolKeyAppendField(ds, "p", pw, plen);
+    PoolKeyAppendField(ds, "d", db, dblen);
+    PoolKeyAppendWide(ds, minS);
+    PoolKeyAppendWide(ds, maxS);
+    PoolKeyAppendWide(ds, incS);
+    PoolKeyAppendWide(ds, (Tcl_WideInt)homogeneous);
+    PoolKeyAppendWide(ds, (Tcl_WideInt)ext);
+    PoolKeyAppendWide(ds, (Tcl_WideInt)getmode);
+    PoolKeyAppendWide(ds, waitTimeout);
+    PoolKeyAppendWide(ds, timeout);
+    PoolKeyAppendWide(ds, maxLifetime);
+    PoolKeyAppendWide(ds, pingInterval);
+    PoolKeyAppendWide(ds, pingTimeout);
+    PoolKeyAppendWide(ds, stmtCacheSize);
 }
 
 /* ------------------------------------------------------------------------- *
@@ -251,14 +279,17 @@ static int Oradpi_ParseConnect(const char *cs, const char **user, uint32_t *ulen
         (dst) = (uint32_t)_v;                                                                                                                                                                          \
     } while (0)
 
-    /* External auth: starts with / */
-    if (cs[0] == '/' && (!slash || slash == cs)) {
-        *extAuth       = 1;
-        const char *at = strchr(cs, '@');
-        if (at && at[1]) {
-            *db = at + 1;
-            SAFE_U32(*dblen, strlen(*db));
-        }
+    /* External authentication has exactly two accepted forms: / and /@db.
+     * Treating every leading slash as external auth used to silently ignore
+     * arbitrary bytes between '/' and '@'. */
+    if (cs[0] == '/') {
+        *extAuth = 1;
+        if (cs[1] == '\0')
+            return 0;
+        if (cs[1] != '@' || cs[2] == '\0')
+            return -1;
+        *db = cs + 2;
+        SAFE_U32(*dblen, strlen(*db));
         return 0;
     }
 
@@ -313,10 +344,14 @@ static int Oradpi_ParseConnect(const char *cs, const char **user, uint32_t *ulen
             SAFE_U32(*plen, (size_t)Tcl_DStringLength(pwDs));
         }
 
-        /* After closing quote, expect @ or end of string */
-        if (closeQuote[1] == '@' && closeQuote[2]) {
+        /* After the closing quote only an optional @database is legal.
+         * Silently ignoring trailing bytes can authenticate with a different
+         * connect descriptor than the caller intended. */
+        if (closeQuote[1] == '@') {
             *db = closeQuote + 2;
             SAFE_U32(*dblen, strlen(*db));
+        } else if (closeQuote[1] != '\0') {
+            return -1;
         }
         return 0;
     }
@@ -385,8 +420,6 @@ void Oradpi_PoolRelease(dpiPool *pool) {
                     pe->refCount--;
                 if (pe->refCount == 0) {
                     doClose = 1;
-                    if (pe->key)
-                        Tcl_Free(pe->key);
                     Tcl_Free((char *)pe);
                     Tcl_DeleteHashEntry(he);
                 }
@@ -527,6 +560,27 @@ int Oradpi_Cmd_Logon(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
         }
     }
 
+    /* Validate all pool values before parsing/allocating credential storage,
+     * and before any narrowing conversion to an ODPI parameter type. */
+    if (usePool) {
+        if (minS < 0 || maxS <= 0 || incS <= 0 || maxS > UINT32_MAX || incS > UINT32_MAX || minS > UINT32_MAX)
+            return Oradpi_SetError(ip, NULL, -1, "-pool: min must be >= 0, max and increment must be > 0 and <= 4294967295");
+        if (minS > maxS)
+            return Oradpi_SetError(ip, NULL, -1, "-pool: min must be <= max");
+        if (poolWaitTimeout < -1 || poolWaitTimeout > UINT32_MAX)
+            return Oradpi_SetError(ip, NULL, -1, "-waittimeout must be -1 or between 0 and 4294967295");
+        if (poolTimeout < -1 || poolTimeout > UINT32_MAX)
+            return Oradpi_SetError(ip, NULL, -1, "-timeout must be -1 or between 0 and 4294967295");
+        if (poolMaxLifetime < -1 || poolMaxLifetime > UINT32_MAX)
+            return Oradpi_SetError(ip, NULL, -1, "-maxlifetime must be -1 or between 0 and 4294967295");
+        if (poolPingInterval < -1 || poolPingInterval > INT_MAX)
+            return Oradpi_SetError(ip, NULL, -1, "-pinginterval must be -1 or between 0 and INT_MAX");
+        if (poolPingTimeout < -1 || poolPingTimeout > UINT32_MAX)
+            return Oradpi_SetError(ip, NULL, -1, "-pingtimeout must be -1 or between 0 and 4294967295");
+        if (poolStmtCacheSize < -1 || poolStmtCacheSize > UINT32_MAX)
+            return Oradpi_SetError(ip, NULL, -1, "-stmtcachesize must be -1 or between 0 and 4294967295");
+    }
+
     const char *user = NULL, *pw = NULL, *db = NULL;
     uint32_t    ulen = 0, plen = 0, dblen = 0;
     int         ext = 0;
@@ -540,12 +594,14 @@ int Oradpi_Cmd_Logon(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
      * exceed uint32_t range instead of silently clamping. */
     if (Oradpi_ParseConnect(connstr, &user, &ulen, &pw, &plen, &db, &dblen, &ext, &pwDs) != 0) {
         Tcl_DStringFree(&pwDs);
-        return Oradpi_SetError(ip, NULL, -1, "malformed connect string (missing closing quote or component exceeds maximum length)");
+        return Oradpi_SetError(ip, NULL, -1, "malformed connect string (invalid quoting, trailing bytes, or component length)");
     }
 
     dpiContext *ctx = Oradpi_GetDpiContext();
-    if (!ctx)
+    if (!ctx) {
+        Tcl_DStringFree(&pwDs);
         return Oradpi_SetError(ip, NULL, -1, "ODPI context is not initialized");
+    }
 
     dpiCommonCreateParams cparams;
     dpiConnCreateParams   ccp;
@@ -559,11 +615,6 @@ int Oradpi_Cmd_Logon(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
     dpiConn *conn = NULL;
     dpiPool *pool = NULL;
     if (usePool) {
-        if (minS < 0 || maxS <= 0 || incS <= 0 || maxS > UINT32_MAX || incS > UINT32_MAX || minS > UINT32_MAX)
-            return Oradpi_SetError(ip, NULL, -1, "-pool: min must be >= 0, max and increment must be > 0 and <= 4294967295");
-        if (minS > maxS)
-            return Oradpi_SetError(ip, NULL, -1, "-pool: min must be <= max");
-
         dpiPoolCreateParams pp;
         dpiContext_initPoolCreateParams(ctx, &pp);
         pp.minSessions      = (uint32_t)minS;
@@ -589,26 +640,30 @@ int Oradpi_Cmd_Logon(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *const obj
         /* Look up or create a shared pool for this parameter combination.
          * Multiple oralogon -pool calls with the same parameters share one dpiPool*. */
         Tcl_DString poolKey;
-        PoolRegistry_BuildKey(&poolKey, user, ulen, db, dblen, minS, maxS, incS, homogeneous, ext, poolWaitTimeout, poolTimeout, poolMaxLifetime, poolPingInterval, poolPingTimeout, poolStmtCacheSize);
+        PoolRegistry_BuildKey(&poolKey, user, ulen, pw, plen, db, dblen, minS, maxS, incS, homogeneous, ext, getmode, poolWaitTimeout, poolTimeout, poolMaxLifetime, poolPingInterval,
+                              poolPingTimeout, poolStmtCacheSize);
 
-        pool = PoolRegistry_Acquire(ctx, Tcl_DStringValue(&poolKey), user, ulen, pw, plen, db, dblen, &cparams, &pp, getmode);
+        pool = PoolRegistry_Acquire(ip, ctx, Tcl_DStringValue(&poolKey), user, ulen, pw, plen, db, dblen, &cparams, &pp, getmode);
         Tcl_DStringFree(&poolKey);
 
         if (!pool) {
             Tcl_DStringFree(&pwDs);
-            return Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_create");
+            return TCL_ERROR;
         }
 
         if (dpiPool_acquireConnection(pool, NULL, 0, NULL, 0, &ccp, &conn) != DPI_SUCCESS) {
+            /* Save the acquisition error before releasing (and possibly
+             * closing) the pool changes ODPI's thread-local diagnostics. */
+            int errorCode = Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_acquireConnection");
             /* Release our registry ref; pool stays alive if other handles share it */
             Tcl_DString releaseKey;
-            PoolRegistry_BuildKey(&releaseKey, user, ulen, db, dblen, minS, maxS, incS, homogeneous, ext, poolWaitTimeout, poolTimeout, poolMaxLifetime, poolPingInterval, poolPingTimeout,
-                                  poolStmtCacheSize);
+            PoolRegistry_BuildKey(&releaseKey, user, ulen, pw, plen, db, dblen, minS, maxS, incS, homogeneous, ext, getmode, poolWaitTimeout, poolTimeout, poolMaxLifetime, poolPingInterval,
+                                  poolPingTimeout, poolStmtCacheSize);
             PoolRegistry_Release(Tcl_DStringValue(&releaseKey), pool);
             Tcl_DStringFree(&releaseKey);
             pool = NULL;
             Tcl_DStringFree(&pwDs);
-            return Oradpi_SetErrorFromODPI(ip, NULL, "dpiPool_acquireConnection");
+            return errorCode;
         }
     } else {
         if (dpiConn_create(ctx, user, ulen, pw, plen, db, dblen, &cparams, &ccp, &conn) != DPI_SUCCESS) {
@@ -769,7 +824,7 @@ int Oradpi_Cmd_Autocommit(void *cd, Tcl_Interp *ip, Tcl_Size objc, Tcl_Obj *cons
     /* Propagate autocommit change to the shared adoption snapshot so
      * future adopters inherit the new value and existing wrappers on the same
      * physical session stay consistent. */
-    Oradpi_SharedConnSyncBehavior(co);
+    Oradpi_SharedConnSyncBehavior(co, ORADPI_BEHAVIOR_AUTOCOMMIT);
     Tcl_SetObjResult(ip, Tcl_NewIntObj(flag));
     return TCL_OK;
 }
